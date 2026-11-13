@@ -1,9 +1,15 @@
 name: Quest Helper Bot Server
 
 on:
+  push:
+    branches: [ main ]
   workflow_dispatch:
   schedule:
     - cron: '0 */6 * * *'
+
+concurrency:
+  group: bot-instance
+  cancel-in-progress: true
 
 jobs:
   bot-server:
