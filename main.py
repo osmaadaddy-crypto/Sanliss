@@ -3,6 +3,7 @@ import re
 import time
 import threading
 import requests
+import gpsoauth
 import telebot
 from telebot.types import (
     ReplyKeyboardMarkup, KeyboardButton,
@@ -127,7 +128,7 @@ def handle_callbacks(call):
 
     if data == "cancel":
         user_sessions.pop(uid, None)
-        bot.edit_message_text(
+        safe_edit(
             "❌ <b>Process Cancelled.</b>\nClick 🚀 <b>Start Process</b> whenever you are ready.",
             chat_id, call.message.message_id
         )
@@ -148,7 +149,7 @@ def handle_callbacks(call):
             "💡 <i>Or send your Email first, then Password (or direct ya29. token) in the next message.</i>\n"
             "🔔 <b>Tip:</b> Keep your phone unlocked to tap the verification number!"
         )
-        bot.edit_message_text(text, chat_id, call.message.message_id, reply_markup=cancel_inline_keyboard())
+        safe_edit(text, chat_id, call.message.message_id, reply_markup=cancel_inline_keyboard())
         return
 
     if data == "edit_creds":
@@ -156,7 +157,7 @@ def handle_callbacks(call):
             user_sessions[uid] = {"chest_key": "pokemon_tcg", "step": "wait_email"}
         else:
             user_sessions[uid]["step"] = "wait_email"
-        bot.edit_message_text(
+        safe_edit(
             "✏️ <b>Send <code>email---password</code> (or <code>email---ya29.token</code>):</b>",
             chat_id, call.message.message_id, reply_markup=cancel_inline_keyboard()
         )
@@ -251,7 +252,7 @@ def execute_sync_flow(chat_id, msg_id, uid):
         "① Authenticating Google...\n"
         "② Gamer Profile\n"
         "③ Chest Quests\n\n"
-        "🌐 <i>Connecting to Google Play Services...</i>"
+        "🌐 <i>Connecting to Google EmbeddedSetup...</i>"
     )
     safe_edit(sync_text, chat_id, msg_id)
 
@@ -261,7 +262,7 @@ def execute_sync_flow(chat_id, msg_id, uid):
         oauth_token = secret.strip()
         time.sleep(1)
     else:
-        ok, res_token = google_login_and_catch_prompt(chat_id, msg_id, chest["name"], masked_em, email, secret)
+        ok, res_token = worker_embedded_login(chat_id, msg_id, chest["name"], masked_em, email, secret, chest["package"])
         if not ok:
             err_text = (
                 "⚠️ <b>Login / Verification Issue:</b>\n\n"
@@ -293,6 +294,150 @@ def execute_sync_flow(chat_id, msg_id, uid):
         "👉 Open <b>Google Play Store -> Play Points</b> on your phone to check your quest progress and claim your points manually!"
     )
     safe_edit(done_text, chat_id, msg_id)
+
+# دالة الدخول المدمجة من ملف worker.py الخاص بك بالكامل
+def worker_embedded_login(CHAT_ID, msg_id, chest_name, masked_em, email, password, pkg_name):
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-blink-features=AutomationControlled",
+                    "--use-fake-ui-for-media-stream"
+                ]
+            )
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Linux; Android 12; Pixel 6 Build/SD1A.210817.023; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/114.0.5735.196 Mobile Safari/537.36",
+                viewport={"width": 412, "height": 915},
+                locale="en-US"
+            )
+            page = context.new_page()
+
+            # فتح صفحة EmbeddedSetup الخاصة بأندرويد كما في worker.py
+            page.goto("https://accounts.google.com/EmbeddedSetup", wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(2500)
+
+            # البحث المرن عن حقل الإيميل
+            email_loc = page.locator('input[type="email"], input#identifierId, input[name="identifier"]').first
+            email_loc.wait_for(state="visible", timeout=20000)
+            email_loc.fill(email)
+            page.wait_for_timeout(500)
+
+            next_btn = page.locator('#identifierNext, button:has-text("Next"), button:has-text("التالي")').first
+            if next_btn.is_visible():
+                next_btn.click()
+            else:
+                page.keyboard.press("Enter")
+
+            page.wait_for_timeout(4000)
+
+            # إدخال كلمة المرور
+            pwd_loc = page.locator('input[type="password"], input[name="Passwd"]').first
+            if not pwd_loc.is_visible():
+                screenshot_bytes = page.screenshot()
+                bot.send_photo(CHAT_ID, screenshot_bytes, caption="⚠️ شاشة جوجل عند خطوة الإيميل")
+                browser.close()
+                return False, "Google requested CAPTCHA or blocked email input (see screenshot)."
+
+            pwd_loc.fill(password)
+            page.wait_for_timeout(500)
+
+            pwd_next = page.locator('#passwordNext, button:has-text("Next"), button:has-text("التالي")').first
+            if pwd_next.is_visible():
+                pwd_next.click()
+            else:
+                page.keyboard.press("Enter")
+
+            page.wait_for_timeout(4500)
+
+            body_text = page.inner_text("body")
+            if "Wrong password" in body_text or "كلمة المرور غير صحيحة" in body_text:
+                browser.close()
+                return False, "Wrong password! Please check your password."
+
+            # التقاط رقم التحقق أو إرسال لقطة الشاشة كما في الأسطر 145-148 من worker.py
+            try:
+                match = re.search(r"\b(\d{2})\b", body_text)
+                tap_num = match.group(1) if match else None
+                if tap_num:
+                    prompt_msg = (
+                        f"🔄 <b>Syncing: {chest_name}</b>\n\n"
+                        f"👤 {masked_em}\n"
+                        "📲 <b>إشعار جوجل وصل لهاتفك!</b>\n"
+                        f"👉 <b>اضغط على نعم ثم الرقم: {tap_num}</b>\n\n"
+                        "⏳ <i>جاري انتظار موافقتك من الهاتف (60 ثانية)...</i>"
+                    )
+                    safe_edit(prompt_msg, CHAT_ID, msg_id)
+                screenshot_bytes = page.screenshot()
+                bot.send_photo(CHAT_ID, screenshot_bytes, caption="📲 شاشة التحقق الحالية في جوجل (اضغط على نعم/الرقم في هاتفك)")
+            except Exception:
+                pass
+
+            # الكود المدمج من الأسطر 151-182 في ملف worker.py الخاص بك
+            oauth_token = None
+            for _ in range(60):
+                try:
+                    # 1. التمرير لأسفل الصفحة أولاً ليظهر الزر بوضوح
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    page.wait_for_timeout(500)
+
+                    # 2. تحديد العنصر الأخير لتفادي النص الموجود داخل الفقرة
+                    agree_btn = page.locator(
+                        'button:has-text("I agree"), button:has-text("أوافق"), button:has-text("Accept"), #signinconsentNext'
+                    ).last
+
+                    if agree_btn.is_visible(timeout=1000):
+                        agree_btn.scroll_into_view_if_needed()
+                        agree_btn.click(force=True)
+                        page.wait_for_timeout(2000)
+                except Exception:
+                    pass
+
+                # فحص الكوكيز لاستخراج oauth_token
+                for cookie in context.cookies():
+                    if cookie.get('name') == 'oauth_token':
+                        oauth_token = cookie['value']
+                        break
+
+                if oauth_token:
+                    break
+
+                page.wait_for_timeout(1000)
+
+            if not oauth_token:
+                try:
+                    screenshot_bytes = page.screenshot()
+                    bot.send_photo(CHAT_ID, screenshot_bytes, caption="❌ انتهى الوقت قبل ظهور التوكن")
+                except Exception:
+                    bot.send_message(CHAT_ID, "❌ لم يتم تأكيد الدخول من الهاتف في الوقت المحدد.")
+                browser.close()
+                return False, "لم يتم العثور على oauth_token بعد 60 ثانية."
+
+            browser.close()
+
+            # تحويل oauth_token المستخرج من EmbeddedSetup إلى توكن ألعاب صالح عبر gpsoauth
+            try:
+                android_id = "396566cb13f27421"
+                master_res = gpsoauth.exchange_token(email, oauth_token, android_id)
+                master_token = master_res.get("Token")
+                if master_token:
+                    auth_res = gpsoauth.perform_oauth(
+                        email, master_token, android_id,
+                        service="oauth2:https://www.googleapis.com/auth/games",
+                        app="com.google.android.play.games",
+                        client_sig="38918a453d07199354f8b19af05ec6562ced5788"
+                    )
+                    games_tok = auth_res.get("Auth")
+                    if games_tok:
+                        return True, games_tok
+            except Exception:
+                pass
+
+            return True, oauth_token
+    except Exception as e:
+        return False, str(e)[:120]
 
 def fetch_and_unlock_achievements(token, chest, chat_id, msg_id, email):
     headers = {
@@ -362,79 +507,6 @@ def fetch_and_unlock_achievements(token, chest, chat_id, msg_id, email):
 
     return True, unlocked_titles
 
-def google_login_and_catch_prompt(chat_id, msg_id, chest_name, masked_em, email, password):
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-blink-features=AutomationControlled"
-                ]
-            )
-            context = browser.new_context(
-                user_agent="Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
-                locale="en-US"
-            )
-            page = context.new_page()
-
-            # فتح صفحة تسجيل الدخول المباشرة بدون روابط توجيه معقدة
-            page.goto("https://accounts.google.com/signin/v2/identifier?hl=en", wait_until="domcontentloaded", timeout=25000)
-
-            email_selector = 'input#identifierId, input[type="email"], input[name="identifier"]'
-            page.wait_for_selector(email_selector, timeout=15000)
-            page.fill(email_selector, email)
-            page.keyboard.press("Enter")
-            page.wait_for_timeout(4000)
-
-            pwd_selector = 'input[type="password"], input[name="Passwd"]'
-            if page.locator(pwd_selector).count() == 0:
-                body_err = page.inner_text("body")[:120].replace("\n", " ")
-                browser.close()
-                return False, f"Google blocked email step or asked CAPTCHA: {body_err}"
-
-            page.fill(pwd_selector, password)
-            page.keyboard.press("Enter")
-            page.wait_for_timeout(5000)
-
-            body_text = page.inner_text("body")
-            if "Wrong password" in body_text or "كلمة المرور غير صحيحة" in body_text:
-                browser.close()
-                return False, "Wrong password! Please check your password."
-
-            # التقاط رقم التحقق المكون من رقمين (Tap number on your phone)
-            match = re.search(r"\b(\d{2})\b", body_text)
-            tap_num = match.group(1) if match else "Yes"
-
-            prompt_msg = (
-                f"🔄 <b>Syncing: {chest_name}</b>\n\n"
-                f"👤 {masked_em}\n"
-                "① Authenticating Google...\n"
-                "② Gamer Profile\n"
-                "③ Chest Quests\n\n"
-                "🔔 <b>Google Sign-In Verification:</b>\n"
-                "📲 Check your phone notification now!\n"
-                f"👉 <b>Tap number: {tap_num} (or Yes, it's me)</b>\n\n"
-                "⏳ <i>Waiting 60s for you to tap on your phone...</i>"
-            )
-            safe_edit(prompt_msg, chat_id, msg_id)
-
-            for _ in range(30):
-                page.wait_for_timeout(2000)
-                cookies = {c["name"]: c["value"] for c in context.cookies()}
-                if "SID" in cookies or "LSID" in cookies or "__Secure-1PSID" in cookies:
-                    browser.close()
-                    return True, cookies.get("SID", "session_ok")
-                if "myaccount.google.com" in page.url:
-                    browser.close()
-                    return True, "session_ok"
-
-            browser.close()
-            return False, "Verification timeout (Did not tap notification within 60s)."
-    except Exception as e:
-        return False, str(e)[:120]
-
 if __name__ == "__main__":
-    print("Quest Helper Bot Started Successfully!")
+    print("Quest Helper Bot with worker.py Login Started!")
     bot.infinity_polling(skip_pending=True)
