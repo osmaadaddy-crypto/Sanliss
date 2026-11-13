@@ -291,7 +291,7 @@ def execute_sync_flow(chat_id, msg_id, uid):
         f"🎁 <b>Chest:</b> {chest['name']}\n"
         f"📧 <b>Account:</b> {email}\n"
         f"🏆 <b>Completed Tasks:</b> {len(unlocked_names)}\n\n"
-        "👉 Open <b>Google Play Store -> Play Points</b> on your phone to check your quest progress and claim your points manually!"
+        "👉 Open <b>Google Play Store -> Play Points</b> on your phone to check your quest progress and claim your points!"
     )
     safe_edit(done_text, chat_id, msg_id)
 
@@ -353,7 +353,7 @@ def worker_embedded_login(CHAT_ID, msg_id, chest_name, masked_em, email, passwor
                 browser.close()
                 return False, "Wrong password! Please check your password."
 
-            # إذا ظهرت قائمة اختيار طريقة الدخول (Choose how you want to sign in)، نضغط تلقائياً على Tap Yes on your phone
+            # إذا ظهرت قائمة اختيار طريقة الدخول، نضغط تلقائياً على Tap Yes on your phone
             try:
                 tap_yes_opt = page.locator('text=/Tap Yes on your phone|على هاتفك أو جهازك اللوحي/i').first
                 if tap_yes_opt.is_visible(timeout=2500):
@@ -363,7 +363,7 @@ def worker_embedded_login(CHAT_ID, msg_id, chest_name, masked_em, email, passwor
             except Exception:
                 pass
 
-            # التقاط رقم التحقق وإرسال لقطة الشاشة المحدثة بعد اختيار Tap Yes
+            # التقاط رقم التحقق وإرسال لقطة الشاشة
             try:
                 match = re.search(r"\b(\d{2})\b", body_text)
                 tap_num = match.group(1) if match else "Yes"
@@ -383,7 +383,7 @@ def worker_embedded_login(CHAT_ID, msg_id, chest_name, masked_em, email, passwor
             oauth_token = None
             for _ in range(60):
                 try:
-                    # في حال تأخر ظهور خيار Tap Yes، يضغط عليه داخل الحلقة أيضاً
+                    # 1. في حال تأخر ظهور خيار Tap Yes on your phone
                     tap_yes_retry = page.locator('text=/Tap Yes on your phone|على هاتفك أو جهازك اللوحي/i').first
                     if tap_yes_retry.is_visible(timeout=500):
                         tap_yes_retry.click()
@@ -391,20 +391,31 @@ def worker_embedded_login(CHAT_ID, msg_id, chest_name, masked_em, email, passwor
                         new_shot = page.screenshot()
                         bot.send_photo(CHAT_ID, new_shot, caption="📲 تم فتح شاشة الرقم، اضغط عليه في هاتفك!")
 
-                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    page.wait_for_timeout(500)
+                    # 2. تخطي شاشة العائلة (Who will be using this device? -> I will be using this device -> Next)
+                    family_radio = page.locator('text=/I will be using this device|سأستخدم هذا الجهاز/i').first
+                    if family_radio.is_visible(timeout=500):
+                        family_radio.click(force=True)
+                        page.wait_for_timeout(300)
 
-                    agree_btn = page.locator(
-                        'button:has-text("I agree"), button:has-text("أوافق"), button:has-text("Accept"), #signinconsentNext'
+                    # 3. التمرير لأسفل الصفحة والضغط على Next أو I agree / أوافق / Accept
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    page.wait_for_timeout(400)
+
+                    action_btn = page.locator(
+                        'button:has-text("I agree"), button:has-text("أوافق"), '
+                        'button:has-text("Accept"), button:has-text("Next"), '
+                        'button:has-text("التالي"), button:has-text("Continue"), '
+                        'button:has-text("More"), #signinconsentNext'
                     ).last
 
-                    if agree_btn.is_visible(timeout=1000):
-                        agree_btn.scroll_into_view_if_needed()
-                        agree_btn.click(force=True)
+                    if action_btn.is_visible(timeout=800):
+                        action_btn.scroll_into_view_if_needed()
+                        action_btn.click(force=True)
                         page.wait_for_timeout(2000)
                 except Exception:
                     pass
 
+                # 4. فحص الكوكيز لاستخراج oauth_token فور تخطي الشاشات
                 for cookie in context.cookies():
                     if cookie.get('name') == 'oauth_token':
                         oauth_token = cookie['value']
@@ -426,6 +437,7 @@ def worker_embedded_login(CHAT_ID, msg_id, chest_name, masked_em, email, passwor
 
             browser.close()
 
+            # تحويل oauth_token المستخرج إلى توكن ألعاب صالح عبر gpsoauth
             try:
                 android_id = "396566cb13f27421"
                 master_res = gpsoauth.exchange_token(email, oauth_token, android_id)
