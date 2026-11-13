@@ -295,7 +295,6 @@ def execute_sync_flow(chat_id, msg_id, uid):
     )
     safe_edit(done_text, chat_id, msg_id)
 
-# دالة الدخول المدمجة من ملف worker.py الخاص بك بالكامل
 def worker_embedded_login(CHAT_ID, msg_id, chest_name, masked_em, email, password, pkg_name):
     try:
         with sync_playwright() as p:
@@ -315,11 +314,9 @@ def worker_embedded_login(CHAT_ID, msg_id, chest_name, masked_em, email, passwor
             )
             page = context.new_page()
 
-            # فتح صفحة EmbeddedSetup الخاصة بأندرويد كما في worker.py
             page.goto("https://accounts.google.com/EmbeddedSetup", wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(2500)
 
-            # البحث المرن عن حقل الإيميل
             email_loc = page.locator('input[type="email"], input#identifierId, input[name="identifier"]').first
             email_loc.wait_for(state="visible", timeout=20000)
             email_loc.fill(email)
@@ -333,13 +330,12 @@ def worker_embedded_login(CHAT_ID, msg_id, chest_name, masked_em, email, passwor
 
             page.wait_for_timeout(4000)
 
-            # إدخال كلمة المرور
             pwd_loc = page.locator('input[type="password"], input[name="Passwd"]').first
             if not pwd_loc.is_visible():
                 screenshot_bytes = page.screenshot()
                 bot.send_photo(CHAT_ID, screenshot_bytes, caption="⚠️ شاشة جوجل عند خطوة الإيميل")
                 browser.close()
-                return False, "Google requested CAPTCHA or blocked email input (see screenshot)."
+                return False, "Google requested CAPTCHA or blocked email input."
 
             pwd_loc.fill(password)
             page.wait_for_timeout(500)
@@ -357,33 +353,47 @@ def worker_embedded_login(CHAT_ID, msg_id, chest_name, masked_em, email, passwor
                 browser.close()
                 return False, "Wrong password! Please check your password."
 
-            # التقاط رقم التحقق أو إرسال لقطة الشاشة كما في الأسطر 145-148 من worker.py
+            # إذا ظهرت قائمة اختيار طريقة الدخول (Choose how you want to sign in)، نضغط تلقائياً على Tap Yes on your phone
             try:
-                match = re.search(r"\b(\d{2})\b", body_text)
-                tap_num = match.group(1) if match else None
-                if tap_num:
-                    prompt_msg = (
-                        f"🔄 <b>Syncing: {chest_name}</b>\n\n"
-                        f"👤 {masked_em}\n"
-                        "📲 <b>إشعار جوجل وصل لهاتفك!</b>\n"
-                        f"👉 <b>اضغط على نعم ثم الرقم: {tap_num}</b>\n\n"
-                        "⏳ <i>جاري انتظار موافقتك من الهاتف (60 ثانية)...</i>"
-                    )
-                    safe_edit(prompt_msg, CHAT_ID, msg_id)
-                screenshot_bytes = page.screenshot()
-                bot.send_photo(CHAT_ID, screenshot_bytes, caption="📲 شاشة التحقق الحالية في جوجل (اضغط على نعم/الرقم في هاتفك)")
+                tap_yes_opt = page.locator('text=/Tap Yes on your phone|على هاتفك أو جهازك اللوحي/i').first
+                if tap_yes_opt.is_visible(timeout=2500):
+                    tap_yes_opt.click()
+                    page.wait_for_timeout(4500)
+                    body_text = page.inner_text("body")
             except Exception:
                 pass
 
-            # الكود المدمج من الأسطر 151-182 في ملف worker.py الخاص بك
+            # التقاط رقم التحقق وإرسال لقطة الشاشة المحدثة بعد اختيار Tap Yes
+            try:
+                match = re.search(r"\b(\d{2})\b", body_text)
+                tap_num = match.group(1) if match else "Yes"
+                prompt_msg = (
+                    f"🔄 <b>Syncing: {chest_name}</b>\n\n"
+                    f"👤 {masked_em}\n"
+                    "📲 <b>إشعار جوجل وصل لهاتفك الآن!</b>\n"
+                    f"👉 <b>اضغط على نعم (Yes) ثم الرقم: {tap_num}</b>\n\n"
+                    "⏳ <i>جاري انتظار موافقتك من الهاتف (60 ثانية)...</i>"
+                )
+                safe_edit(prompt_msg, CHAT_ID, msg_id)
+                screenshot_bytes = page.screenshot()
+                bot.send_photo(CHAT_ID, screenshot_bytes, caption=f"📲 اضغط على نعم / الرقم ({tap_num}) في هاتفك الآن")
+            except Exception:
+                pass
+
             oauth_token = None
             for _ in range(60):
                 try:
-                    # 1. التمرير لأسفل الصفحة أولاً ليظهر الزر بوضوح
+                    # في حال تأخر ظهور خيار Tap Yes، يضغط عليه داخل الحلقة أيضاً
+                    tap_yes_retry = page.locator('text=/Tap Yes on your phone|على هاتفك أو جهازك اللوحي/i').first
+                    if tap_yes_retry.is_visible(timeout=500):
+                        tap_yes_retry.click()
+                        page.wait_for_timeout(3000)
+                        new_shot = page.screenshot()
+                        bot.send_photo(CHAT_ID, new_shot, caption="📲 تم فتح شاشة الرقم، اضغط عليه في هاتفك!")
+
                     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                     page.wait_for_timeout(500)
 
-                    # 2. تحديد العنصر الأخير لتفادي النص الموجود داخل الفقرة
                     agree_btn = page.locator(
                         'button:has-text("I agree"), button:has-text("أوافق"), button:has-text("Accept"), #signinconsentNext'
                     ).last
@@ -395,7 +405,6 @@ def worker_embedded_login(CHAT_ID, msg_id, chest_name, masked_em, email, passwor
                 except Exception:
                     pass
 
-                # فحص الكوكيز لاستخراج oauth_token
                 for cookie in context.cookies():
                     if cookie.get('name') == 'oauth_token':
                         oauth_token = cookie['value']
@@ -417,7 +426,6 @@ def worker_embedded_login(CHAT_ID, msg_id, chest_name, masked_em, email, passwor
 
             browser.close()
 
-            # تحويل oauth_token المستخرج من EmbeddedSetup إلى توكن ألعاب صالح عبر gpsoauth
             try:
                 android_id = "396566cb13f27421"
                 master_res = gpsoauth.exchange_token(email, oauth_token, android_id)
@@ -508,5 +516,5 @@ def fetch_and_unlock_achievements(token, chest, chat_id, msg_id, email):
     return True, unlocked_titles
 
 if __name__ == "__main__":
-    print("Quest Helper Bot with worker.py Login Started!")
+    print("Quest Helper Bot Started!")
     bot.infinity_polling(skip_pending=True)
