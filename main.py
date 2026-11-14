@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import base64
 import threading
 import requests
 import gpsoauth
@@ -20,6 +21,7 @@ CHESTS_DB = {
     "lords_mobile": {
         "name": "Lords Mobile: Kingdom Wars (50)",
         "package": "com.igg.android.lordsmobile",
+        "search_query": "Lords Mobile",
         "client_sig": "75adf545f77fee9de110d4ddfae60bb3b9b17dad",
         "keywords": ["skirmish", "ridge", "castle", "level 5", "perilous"],
         "task_ids": []
@@ -27,6 +29,7 @@ CHESTS_DB = {
     "pokemon_tcg": {
         "name": "Pokémon TCG Pocket (50)",
         "package": "jp.pokemon.pokemontcgp",
+        "search_query": "Pokémon TCG Pocket",
         "client_sig": "38918a453d07199354f8b19af05ec6562ced5788",
         "keywords": ["stamina", "booster", "wonder", "solo", "battle"],
         "task_ids": []
@@ -34,6 +37,7 @@ CHESTS_DB = {
     "angry_birds_2": {
         "name": "Angry birds 2 (50)",
         "package": "com.rovio.baba",
+        "search_query": "Angry Birds 2",
         "client_sig": "38918a453d07199354f8b19af05ec6562ced5788",
         "keywords": ["feathery", "hills", "new york"],
         "task_ids": []
@@ -41,6 +45,7 @@ CHESTS_DB = {
     "8ball_pool": {
         "name": "8ball pool (50)",
         "package": "com.miniclip.eightballpool",
+        "search_query": "8 Ball Pool",
         "client_sig": "38918a453d07199354f8b19af05ec6562ced5788",
         "keywords": ["win", "pool", "amateur"],
         "task_ids": []
@@ -48,6 +53,7 @@ CHESTS_DB = {
     "mobile_legends": {
         "name": "Mobile legends (50)",
         "package": "com.mobile.legends",
+        "search_query": "Mobile Legends",
         "client_sig": "38918a453d07199354f8b19af05ec6562ced5788",
         "keywords": ["classic", "mvp", "match"],
         "task_ids": []
@@ -236,79 +242,103 @@ def safe_edit(text, chat_id, msg_id, reply_markup=None):
     except Exception:
         pass
 
-def request_game_oauth_via_gms(email, master_token, android_id, pkg_name, pkg_sig):
+def generate_cgki_ids(app_id_str):
     """
-    محاكاة طلب Google Play Services (GMS) الحقيقي لتوليد توكن ألعاب لحزمة خارجية
+    توليد أكواد الإنجازات القياسية CgkI من المعرف الرقمي للعبة (Protobuf Varint Base64)
     """
-    attempts = [
-        # المحاولة 1: GMS كوسيط بدون has_permission لإظهار رابط الموافقة أو التوكن
-        {
-            "service": "oauth2:https://www.googleapis.com/auth/games",
-            "app": pkg_name,
-            "client_sig": pkg_sig,
-            "callerPkg": "com.google.android.gms",
-            "callerSig": GMS_SIG,
-            "has_perm": False
-        },
-        # المحاولة 2: GMS كوسيط مع has_permission=1
-        {
-            "service": "oauth2:https://www.googleapis.com/auth/games",
-            "app": pkg_name,
-            "client_sig": pkg_sig,
-            "callerPkg": "com.google.android.gms",
-            "callerSig": GMS_SIG,
-            "has_perm": True
-        },
-        # المحاولة 3: Play Games كوسيط مع بصمة GMS
-        {
-            "service": "oauth2:https://www.googleapis.com/auth/games",
-            "app": pkg_name,
-            "client_sig": GMS_SIG,
-            "callerPkg": "com.google.android.play.games",
-            "callerSig": GMS_SIG,
-            "has_perm": True
-        },
-        # المحاولة 4: نطاق games_lite عبر GMS
-        {
-            "service": "oauth2:https://www.googleapis.com/auth/games_lite",
-            "app": pkg_name,
-            "client_sig": pkg_sig,
-            "callerPkg": "com.google.android.gms",
-            "callerSig": GMS_SIG,
-            "has_perm": False
-        }
+    try:
+        app_id = int(app_id_str)
+        def encode_varint(val):
+            out = bytearray()
+            while val > 0x7f:
+                out.append((val & 0x7f) | 0x80)
+                val >>= 7
+            out.append(val & 0x7f)
+            return bytes(out)
+
+        results = []
+        for index in range(1, 25):
+            raw = b'\x08' + encode_varint(app_id) + b'\x10\x01\x18' + encode_varint(index)
+            b64 = base64.urlsafe_b64encode(raw).decode('utf-8').rstrip('=')
+            results.append(b64)
+        return results
+    except Exception:
+        return []
+
+def discover_game_app_id(fp_token, store_token, chest):
+    """
+    البحث عن المعرف الرقمي (12-digit Play Games App ID) الخاص باللعبة عبر واجهة First-Party والمتجر
+    """
+    pkg = chest["package"]
+    query = chest.get("search_query", "Lords Mobile")
+
+    headers_fp = {
+        "Authorization": f"Bearer {fp_token}",
+        "Content-Type": "application/json",
+        "User-Agent": "GooglePlayGames/2024 (Android 13; en_US)"
+    }
+
+    # 1. البحث في واجهة v1whitelisted/applications
+    search_urls = [
+        f"https://www.googleapis.com/games/v1whitelisted/applications?query={requests.utils.quote(query)}&language=en_US",
+        f"https://www.googleapis.com/games/v1whitelisted/applications?language=en_US&pageSize=50",
+        f"https://www.googleapis.com/games/v1whitelisted/players/me/applications?language=en_US"
     ]
-
-    last_res = {}
-    for cfg in attempts:
-        data = {
-            "accountType": "HOSTED_OR_GOOGLE",
-            "Email": email,
-            "EncryptedPasswd": master_token,
-            "service": cfg["service"],
-            "source": "android",
-            "androidId": android_id,
-            "app": cfg["app"],
-            "client_sig": cfg["client_sig"],
-            "callerPkg": cfg["callerPkg"],
-            "callerSig": cfg["callerSig"],
-            "device_country": "us",
-            "operatorCountry": "us",
-            "lang": "en",
-            "sdk_version": 33
-        }
-        if cfg["has_perm"]:
-            data["has_permission"] = 1
-
+    for u in search_urls:
         try:
-            res = gpsoauth._perform_auth_request(data)
-            last_res = res
-            if res.get("Auth") or res.get("Error") == "NeedsBrowser":
-                return res
-        except Exception as e:
-            last_res = {"Error": str(e)[:30]}
+            r = requests.get(u, headers=headers_fp, timeout=8)
+            if r.status_code == 200:
+                txt = r.text
+                if pkg in txt:
+                    data = r.json()
+                    for item in data.get("items", []):
+                        if pkg in str(item):
+                            aid = item.get("id") or item.get("application", {}).get("id")
+                            if aid and str(aid).isdigit():
+                                return str(aid), "v1wl_search"
+        except Exception:
+            pass
 
-    return last_res
+    # 2. البحث في تفاصيل حزمة المتجر fdfe/details عن 12 رقماً خاصاً بـ Play Games
+    if store_token:
+        headers_st = {
+            "Authorization": f"Bearer {store_token}",
+            "X-DFE-Device-Id": "396566cb13f27421",
+            "User-Agent": "Android-Finsky/38.2.28-29 (api=3,versionCode=83822800,sdk=33,device=pixel6,hardware=oriole,product=oriole)"
+        }
+        try:
+            r_det = requests.get(f"https://android.clients.google.com/fdfe/details?doc={pkg}", headers=headers_st, timeout=8)
+            if r_det.status_code == 200:
+                matches = re.findall(rb"\b(\d{12})\b", r_det.content)
+                for m in matches:
+                    cand = m.decode("utf-8")
+                    if not cand.startswith("17") and cand != "590296086962":
+                        return cand, "fdfe_details"
+        except Exception:
+            pass
+
+    # 3. البحث في صفحة متجر جوجل بلاي العامة للعبة
+    try:
+        r_web = requests.get(f"https://play.google.com/store/apps/details?id={pkg}&hl=en", timeout=8)
+        if r_web.status_code == 200:
+            # البحث عن معرفات CgkI جاهزة أو أرقام مشروع الألعاب
+            cgk_matches = re.findall(r"(CgkI[A-Za-z0-9_-]{12,20})", r_web.text)
+            if cgk_matches:
+                raw_b = base64.urlsafe_b64decode(cgk_matches[0] + "===")
+                if raw_b and raw_b[0] == 8:
+                    val = 0
+                    shift = 0
+                    for b in raw_b[1:]:
+                        val |= (b & 0x7f) << shift
+                        if not (b & 0x80):
+                            break
+                        shift += 7
+                    if val > 10000000:
+                        return str(val), "play_web_cgk"
+    except Exception:
+        pass
+
+    return None, "NotFound"
 
 def execute_sync_flow(chat_id, msg_id, uid):
     session = user_sessions.get(uid)
@@ -334,7 +364,7 @@ def execute_sync_flow(chat_id, msg_id, uid):
         tokens = {
             "games_token": secret.strip(),
             "store_token": secret.strip(),
-            "game_pkg_token": secret.strip(),
+            "game_pkg_token": None,
             "pkg_auth_status": "Direct ya29 Token"
         }
         time.sleep(1)
@@ -354,26 +384,26 @@ def execute_sync_flow(chat_id, msg_id, uid):
         f"🔄 <b>Syncing: {chest['name']}</b>\n\n"
         f"👤 {masked_em}\n"
         "🟢 ① Google OAuth2 [OK]\n"
-        f"🔄 ② Game Auth: {tokens.get('pkg_auth_status')}...\n"
+        "🔄 ② Discovering Game App ID & Installing...\n"
         "③ Chest Quests\n\n"
-        "☁️ <i>Simulating game install & Play Games sign-in...</i>"
+        "☁️ <i>Simulating game install & fetching Game ID...</i>"
     )
     safe_edit(step2_text, chat_id, msg_id)
 
     store_status = simulate_store_install(tokens.get("store_token"), chest["package"])
-    signin_code = simulate_game_signin(tokens, chest["package"])
-    time.sleep(1.0)
+    app_id, app_id_src = discover_game_app_id(tokens.get("games_token"), tokens.get("store_token"), chest)
+    signin_code = simulate_game_signin(tokens, chest["package"], app_id)
 
-    ok_ach, unlocked_names, diag_msg = fetch_and_unlock_achievements(tokens, chest, chat_id, msg_id, email)
+    ok_ach, unlocked_names, diag_msg = fetch_and_unlock_achievements(tokens, chest, app_id, chat_id, msg_id, email)
 
-    unlocked_list_str = "\n".join([f"  • {name}" for name in unlocked_names[:8]]) if unlocked_names else "  • None"
+    unlocked_list_str = "\n".join([f"  • {name}" for name in unlocked_names[:10]]) if unlocked_names else "  • None"
 
     done_text = (
         "🎉 <b>Quest Execution Report</b>\n\n"
         f"🎁 <b>Chest:</b> {chest['name']}\n"
         f"📧 <b>Account:</b> {email}\n"
         f"☁️ <b>Cloud Install:</b> {store_status}\n"
-        f"🎮 <b>Game Token:</b> {tokens.get('pkg_auth_status')}\n"
+        f"🆔 <b>Game App ID:</b> {app_id or 'None'} ({app_id_src})\n"
         f"🔑 <b>Play Games Sign-in:</b> {signin_code}\n"
         f"📡 <b>API Details:</b> {diag_msg}\n"
         f"🏆 <b>Unlocked Quests ({len(unlocked_names)}):</b>\n{unlocked_list_str}\n\n"
@@ -392,18 +422,14 @@ def simulate_store_install(store_token, package_name):
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
     }
     try:
-        # جلب رقم النسخة الحقيقي (versionCode) من متجر جوجل بلاي
-        vc = 1
-        r_det = requests.get(f"https://android.clients.google.com/fdfe/details?doc={package_name}", headers=headers, timeout=8)
-        m_vc = re.search(rb"\x18([\x80-\xff]*[\x00-\x7f])", r_det.content)
         r_pur = requests.post(
             "https://android.clients.google.com/fdfe/purchase",
-            data=f"ot=1&doc={package_name}&vc={vc}",
+            data=f"ot=1&doc={package_name}&vc=1",
             headers=headers,
             timeout=10
         )
         r_del = requests.get(
-            f"https://android.clients.google.com/fdfe/delivery?ot=1&doc={package_name}&vc={vc}",
+            f"https://android.clients.google.com/fdfe/delivery?ot=1&doc={package_name}&vc=1",
             headers=headers,
             timeout=10
         )
@@ -411,7 +437,7 @@ def simulate_store_install(store_token, package_name):
     except Exception:
         return "Done"
 
-def simulate_game_signin(tokens, package_name):
+def simulate_game_signin(tokens, package_name, app_id=None):
     tok = tokens.get("game_pkg_token") or tokens.get("games_token")
     if not tok:
         return "No Token"
@@ -422,10 +448,13 @@ def simulate_game_signin(tokens, package_name):
         "User-Agent": "GooglePlayGames/2024 (Android 13; en_US)"
     }
     status_codes = []
-    for url in [
-        "https://www.googleapis.com/games/v1/players/me",
-        "https://www.googleapis.com/games/v1/applications/played"
-    ]:
+    urls = ["https://www.googleapis.com/games/v1/players/me"]
+    if app_id:
+        urls.append(f"https://www.googleapis.com/games/v1whitelisted/applications/{app_id}/played")
+    else:
+        urls.append("https://www.googleapis.com/games/v1/applications/played")
+
+    for url in urls:
         try:
             if url.endswith("/played"):
                 r = requests.post(url, headers=headers, timeout=8)
@@ -574,7 +603,7 @@ def worker_embedded_login(CHAT_ID, msg_id, chest, masked_em, email, password):
                 "store_token": None,
                 "games_token": oauth_token,
                 "game_pkg_token": None,
-                "pkg_auth_status": "Init"
+                "pkg_auth_status": "FirstPartyActive"
             }
 
             try:
@@ -601,53 +630,6 @@ def worker_embedded_login(CHAT_ID, msg_id, chest, masked_em, email, password):
                     )
                     if gm_res.get("Auth"):
                         tokens_bundle["games_token"] = gm_res.get("Auth")
-
-                    # استدعاء دالة GMS المخصصة لجلب توكن اللعبة
-                    pkg_res = request_game_oauth_via_gms(
-                        email, master_token, android_id,
-                        chest["package"], chest["client_sig"]
-                    )
-
-                    if pkg_res.get("Auth"):
-                        tokens_bundle["game_pkg_token"] = pkg_res.get("Auth")
-                        tokens_bundle["pkg_auth_status"] = "OK [200]"
-                    elif pkg_res.get("Error") == "NeedsBrowser" and pkg_res.get("Url"):
-                        tokens_bundle["pkg_auth_status"] = "NeedsBrowser"
-                        try:
-                            page.goto(pkg_res.get("Url"), wait_until="domcontentloaded", timeout=20000)
-                            page.wait_for_timeout(3000)
-                            shot1 = page.screenshot()
-                            bot.send_photo(CHAT_ID, shot1, caption="🎮 شاشة ربط اللعبة بـ Play Games")
-
-                            for _ in range(3):
-                                allow_btn = page.locator(
-                                    'button:has-text("Allow"), button:has-text("Continue"), '
-                                    'button:has-text("سماح"), button:has-text("متابعة"), '
-                                    'button:has-text("Create"), button:has-text("Sign in"), '
-                                    'button:has-text("Save"), div[role="button"]:has-text("Continue"), '
-                                    'div[role="button"]:has-text("Allow")'
-                                ).last
-                                if allow_btn.is_visible(timeout=1500):
-                                    allow_btn.click(force=True)
-                                    page.wait_for_timeout(2500)
-
-                            pkg_retry = request_game_oauth_via_gms(
-                                email, master_token, android_id,
-                                chest["package"], chest["client_sig"]
-                            )
-                            if pkg_retry.get("Auth"):
-                                tokens_bundle["game_pkg_token"] = pkg_retry.get("Auth")
-                                tokens_bundle["pkg_auth_status"] = "OK (After Consent)"
-                            else:
-                                tokens_bundle["pkg_auth_status"] = f"AfterConsent ({pkg_retry.get('Error', 'NoAuth')})"
-                        except Exception as e_nb:
-                            tokens_bundle["pkg_auth_status"] = f"NB_Err ({str(e_nb)[:20]})"
-                    else:
-                        err_name = pkg_res.get("Error", "Unknown")
-                        detail = pkg_res.get("Advice", pkg_res.get("ErrorDetail", ""))
-                        tokens_bundle["pkg_auth_status"] = f"FallbackToFirstParty ({err_name} {detail})".strip()
-                else:
-                    tokens_bundle["pkg_auth_status"] = f"NoMaster ({master_res.get('Error', 'Err')})"
             except Exception as ex:
                 tokens_bundle["pkg_auth_status"] = f"Ex: {str(ex)[:30]}"
 
@@ -656,8 +638,7 @@ def worker_embedded_login(CHAT_ID, msg_id, chest, masked_em, email, password):
     except Exception as e:
         return False, str(e)[:120]
 
-def fetch_and_unlock_achievements(tokens, chest, chat_id, msg_id, email):
-    # استخدام توكن اللعبة إن وجد، وإلا استخدام التوكن الأساسي الأول (First-Party) بدلاً من التوقف!
+def fetch_and_unlock_achievements(tokens, chest, app_id, chat_id, msg_id, email):
     primary_tok = tokens.get("game_pkg_token") or tokens.get("games_token")
     if not primary_tok:
         return False, [], "NoTokenAtAll"
@@ -673,13 +654,14 @@ def fetch_and_unlock_achievements(tokens, chest, chat_id, msg_id, email):
     diag_info = []
     definitions = []
 
-    # فحص المسارات عبر التوكن المتاح (بما في ذلك مسارات v1whitelisted للطرف الأول)
-    endpoints = [
-        "https://www.googleapis.com/games/v1/achievementDefinitions?language=en_US",
-        "https://www.googleapis.com/games/v1whitelisted/achievementDefinitions?language=en_US",
-        "https://www.googleapis.com/games/v1whitelisted/players/me/achievements?language=en_US",
-        "https://www.googleapis.com/games/v1/players/me/achievements?language=en_US"
-    ]
+    # إذا تم العثور على الـ App ID الرقمي للعبة، نمرره لواجهة v1whitelisted لسحب إنجازات اللعبة مباشرة
+    endpoints = []
+    if app_id:
+        endpoints.extend([
+            f"https://www.googleapis.com/games/v1whitelisted/applications/{app_id}/achievements?language=en_US",
+            f"https://www.googleapis.com/games/v1whitelisted/achievementDefinitions?applicationId={app_id}&language=en_US",
+            f"https://www.googleapis.com/games/v1whitelisted/players/me/achievements?applicationId={app_id}&language=en_US"
+        ])
 
     for ep in endpoints:
         try:
@@ -690,6 +672,7 @@ def fetch_and_unlock_achievements(tokens, chest, chat_id, msg_id, email):
                 items = r.json().get("items", [])
                 if items:
                     definitions.extend(items)
+                    break
         except Exception:
             pass
 
@@ -701,12 +684,15 @@ def fetch_and_unlock_achievements(tokens, chest, chat_id, msg_id, email):
             aid = a.get("id")
             if not aid or aid in seen_ids:
                 continue
+            # تجاهل إنجازات Play Games العامة التي تبدأ بـ CgkIsunb0aQR
+            if aid.startswith("CgkIsunb0aQR"):
+                continue
             text_blob = (a.get("name", "") + " " + a.get("description", "")).lower()
             if any(k in text_blob for k in keywords):
                 matched.append(a)
                 seen_ids.add(aid)
 
-        target_list = matched if matched else []
+        target_list = matched if matched else [a for a in definitions if not a.get("id", "").startswith("CgkIsunb0aQR")][:10]
         total = len(target_list)
 
         for idx, ach in enumerate(target_list, start=1):
@@ -722,28 +708,40 @@ def fetch_and_unlock_achievements(tokens, chest, chat_id, msg_id, email):
             )
             safe_edit(progress_text, chat_id, msg_id)
 
-            if atype == "INCREMENTAL":
-                steps = ach.get("totalSteps", 10)
-                u = f"https://www.googleapis.com/games/v1/achievements/{aid}/increment?stepsToIncrement={steps}"
-            else:
-                u = f"https://www.googleapis.com/games/v1/achievements/{aid}/unlock"
-
-            try:
-                ru = requests.post(u, headers=headers, timeout=8)
-                unlocked_titles.append(f"{aname} [{ru.status_code}]")
-            except Exception:
-                unlocked_titles.append(f"{aname} [Err]")
-            time.sleep(1.0)
-
-        if not target_list:
-            # عرض أسماء أول 3 إنجازات وجدها الخادم لمعرفة أي قائمة أرجعها جوجل
-            sample_names = [a.get("name", a.get("id", "?"))[:20] for a in definitions[:3]]
-            diag_info.append(f"Found({len(definitions)}): " + "/".join(sample_names))
+            for base_u in ["https://www.googleapis.com/games/v1whitelisted", "https://www.googleapis.com/games/v1"]:
+                if atype == "INCREMENTAL":
+                    steps = ach.get("totalSteps", 10)
+                    u = f"{base_u}/achievements/{aid}/increment?stepsToIncrement={steps}"
+                else:
+                    u = f"{base_u}/achievements/{aid}/unlock"
+                try:
+                    ru = requests.post(u, headers=headers, timeout=8)
+                    if ru.status_code == 200:
+                        unlocked_titles.append(f"{aname} [200]")
+                        break
+                except Exception:
+                    pass
+            time.sleep(0.8)
 
         return True, unlocked_titles, " | ".join(diag_info)
 
-    return False, unlocked_titles, " | ".join(diag_info)
+    # إذا لم ترجع القائمة النصية ولكن لدينا App ID، نقوم بتوليد وفتح أول 20 معرف CgkI خاص باللعبة حسابياً!
+    if app_id:
+        gen_ids = generate_cgki_ids(app_id)
+        diag_info.append(f"GenCgkI({len(gen_ids)})")
+        for idx, aid in enumerate(gen_ids[:15], start=1):
+            for base_u in ["https://www.googleapis.com/games/v1whitelisted", "https://www.googleapis.com/games/v1"]:
+                try:
+                    ru = requests.post(f"{base_u}/achievements/{aid}/unlock", headers=headers, timeout=6)
+                    if ru.status_code == 200:
+                        unlocked_titles.append(f"{aid} [200]")
+                        break
+                except Exception:
+                    pass
+        return True, unlocked_titles, " | ".join(diag_info)
+
+    return False, unlocked_titles, " | ".join(diag_info) if diag_info else "AppID_Required"
 
 if __name__ == "__main__":
-    print("Quest Helper GMS Caller Bot Started!")
+    print("Quest Helper AppID Discovery Bot Started!")
     bot.infinity_polling(skip_pending=True)
