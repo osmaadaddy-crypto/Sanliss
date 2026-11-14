@@ -247,6 +247,9 @@ def safe_edit(text, chat_id, msg_id, reply_markup=None):
         pass
 
 def generate_cgki_ids(app_id_str):
+    """
+    توليد أكواد الإنجازات القياسية التي تبدأ بـ CgkI حصرياً
+    """
     try:
         app_id = int(app_id_str)
         def encode_varint(val):
@@ -261,132 +264,203 @@ def generate_cgki_ids(app_id_str):
         for index in range(1, 25):
             raw = b'\x08' + encode_varint(app_id) + b'\x10\x01\x18' + encode_varint(index)
             b64 = base64.urlsafe_b64encode(raw).decode('utf-8').rstrip('=')
-            results.append(b64)
+            # التأكد من أن الكود المولد يبدأ بـ CgkI كما يشترط خادم جوجل
+            if b64.startswith("CgkI"):
+                results.append(b64)
         return results
     except Exception:
         return []
 
-def extract_app_id_from_cloud_apk(pkg_name):
+def deep_scan_apk_file(apk_path, pkg_name):
     """
-    يفك حزمة اللعبة على السيرفر ويستخرج جميع معرفات Play Games المحتملة مع استبعاد facebook_app_id (334926755014)
+    فحص ثنائي عميق (Binary + Apktool Scan) لكل ملفات APK و DEX و Assets
+    لاستخراج أكواد CgkI الصريحة ومعرفات Google Play Games المكونة من 12 رقماً
     """
-    if pkg_name in EXTRACTED_CACHE:
-        return EXTRACTED_CACHE[pkg_name]
+    out_dir = f"/tmp/deep_{pkg_name}"
+    candidate_ids = []
+    found_cgkis = []
+    blacklist_ids = {"334926755014", "590296086962", "15551234567"}
 
-    apk_path = f"/tmp/{pkg_name}.apk"
-    out_dir = f"/tmp/dec_{pkg_name}"
+    # إذا كان الملف XAPK يحتوي على عدة ملفات APK، نفكها جميعاً في مجلد واحد
+    extract_raw_dir = f"/tmp/raw_{pkg_name}"
+    subprocess.run(["rm", "-rf", extract_raw_dir, out_dir], check=False)
+    os.makedirs(extract_raw_dir, exist_ok=True)
 
-    if not os.path.exists(out_dir):
-        dl_urls = [
-            f"https://d.apkpure.net/b/APK/{pkg_name}?version=latest",
-            f"https://d.apkpure.com/b/APK/{pkg_name}?version=latest",
-            f"https://d.apkpure.net/b/XAPK/{pkg_name}?version=latest"
-        ]
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        }
-        downloaded = False
-        for u in dl_urls:
+    target_apk = apk_path
+    try:
+        with zipfile.ZipFile(apk_path, 'r') as z:
+            z.extractall(extract_raw_dir)
+            sub_apks = [os.path.join(extract_raw_dir, f) for f in os.listdir(extract_raw_dir) if f.endswith(".apk")]
+            if sub_apks:
+                # نختار الـ base apk لفكه بـ apktool، ونفحص بقية الـ splits ثنائياً
+                for sa in sub_apks:
+                    if "base" in sa.lower() or pkg_name in sa.lower():
+                        target_apk = sa
+                        break
+    except Exception:
+        pass
+
+    # 1. فحص ثنائي مباشر (Binary Regex Scan) على كل الملفات المستخرجة (بما فيها classes.dex و assets/bin/Data)
+    for root, _, files in os.walk(extract_raw_dir):
+        for fn in files:
+            fpath = os.path.join(root, fn)
             try:
-                subprocess.run(
-                    ["curl", "-L", "-s", "-A", headers["User-Agent"], "--max-time", "25", "-o", apk_path, u],
-                    check=False
-                )
+                with open(fpath, "rb") as bf:
+                    data = bf.read()
+                    # أ) التقاط أي سلسلة CgkI صريحة
+                    for m in re.findall(rb"(CgkI[A-Za-z0-9_-]{14,20})", data):
+                        c_str = m.decode("utf-8", errors="ignore")
+                        if c_str not in found_cgkis and not c_str.startswith("CgkIsunb0aQR"):
+                            found_cgkis.append(c_str)
+                    # ب) التقاط أي Client ID خاص بجوجل (12 رقماً متبوعاً بـ .apps.googleusercontent.com)
+                    for m in re.findall(rb"(\d{11,13})-[a-z0-9]{15,35}\.apps\.googleusercontent\.com", data):
+                        n_str = m.decode("utf-8", errors="ignore")
+                        if n_str not in blacklist_ids and n_str not in candidate_ids:
+                            candidate_ids.insert(0, n_str)
+            except Exception:
+                pass
+
+    # 2. فك الـ APK الأساسي عبر apktool لقراءة AndroidManifest.xml و res/values/strings.xml
+    try:
+        subprocess.run(["apktool", "d", "-s", "-f", target_apk, "-o", out_dir], timeout=45, check=False)
+    except Exception:
+        pass
+
+    for root, _, files in os.walk(out_dir):
+        for fn in files:
+            if not (fn.endswith(".xml") or fn.endswith(".json") or fn.endswith(".txt") or fn.endswith(".properties")):
+                continue
+            fpath = os.path.join(root, fn)
+            try:
+                with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                    for c in re.findall(r"\b(CgkI[A-Za-z0-9_-]{14,20})\b", content):
+                        if c not in found_cgkis and not c.startswith("CgkIsunb0aQR"):
+                            found_cgkis.append(c)
+
+                    for m in re.finditer(r'name="([^"]+)"[^>]*>([^<]+)<', content):
+                        k_name = m.group(1).lower()
+                        k_val = m.group(2).strip()
+                        if any(bad in k_name for bad in ["facebook", "fb_", "phone", "test", "dummy"]):
+                            continue
+                        for n in re.findall(r"\b(\d{12})\b", k_val):
+                            if n not in blacklist_ids and n not in candidate_ids:
+                                # نتحقق من أن الرقم يولّد كوداً يبدأ بـ CgkI فعلاً
+                                if generate_cgki_ids(n):
+                                    if any(w in k_name for w in ["game", "app_id", "google", "gcm", "project", "client"]):
+                                        candidate_ids.insert(0, n)
+                                    else:
+                                        candidate_ids.append(n)
+            except Exception:
+                pass
+
+    # 3. إذا وجدنا كود CgkI صريح، نستخرج منه الـ App ID الرقمي مباشرة ونضعه في الصدارة
+    for cgk in found_cgkis:
+        try:
+            raw_b = base64.urlsafe_b64decode(cgk + "===")
+            if raw_b and raw_b[0] == 8:
+                val, shift = 0, 0
+                for b in raw_b[1:]:
+                    val |= (b & 0x7f) << shift
+                    if not (b & 0x80):
+                        break
+                    shift += 7
+                s_val = str(val)
+                if len(s_val) >= 11 and s_val not in blacklist_ids and s_val not in candidate_ids:
+                    candidate_ids.insert(0, s_val)
+        except Exception:
+            pass
+
+    return candidate_ids[:8], found_cgkis[:20]
+
+def simulate_store_install_and_extract(store_token, package_name):
+    """
+    1. يجلب آخر versionCode حقيقي للعبة من متجر جوجل بلاي
+    2. ينفذ الشراء المجاني ويستخرج رابط تحميل الـ APK الرسمي من سيرفر جوجل (fdfe/delivery)
+    3. إذا لم يتوفر رابط المتجر، يحمّل الحزمة من مصادر APK البديلة ويجري الفحص العميق
+    """
+    if package_name in EXTRACTED_CACHE:
+        cached = EXTRACTED_CACHE[package_name]
+        return cached["store_status"], cached["cands"], cached["cgkis"], cached["src"]
+
+    headers = {
+        "Authorization": f"Bearer {store_token}",
+        "X-DFE-Device-Id": "396566cb13f27421",
+        "User-Agent": "Android-Finsky/38.2.28-29 (api=3,versionCode=83822800,sdk=33,device=pixel6,hardware=oriole,product=oriole)",
+        "Accept-Language": "en-US",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
+    }
+
+    store_status = "Skipped"
+    apk_path = f"/tmp/pkg_{package_name}.apk"
+    downloaded_src = None
+
+    if store_token:
+        try:
+            vc = 220600000 if "lordsmobile" in package_name else 1
+            r_det = requests.get(f"https://android.clients.google.com/fdfe/details?doc={package_name}", headers=headers, timeout=10)
+            if r_det.status_code == 200:
+                # قراءة versionCode الحقيقي من رد المتجر
+                for m in re.findall(rb"\x18([\x80-\xff]{2,4}[\x00-\x7f])", r_det.content):
+                    val, shift = 0, 0
+                    for b in m:
+                        val |= (b & 0x7f) << shift
+                        shift += 7
+                    if 10000 <= val <= 2140000000:
+                        vc = val
+                        break
+
+            r_pur = requests.post(
+                "https://android.clients.google.com/fdfe/purchase",
+                data=f"ot=1&doc={package_name}&vc={vc}",
+                headers=headers,
+                timeout=10
+            )
+            r_del = requests.get(
+                f"https://android.clients.google.com/fdfe/delivery?ot=1&doc={package_name}&vc={vc}",
+                headers=headers,
+                timeout=10
+            )
+            store_status = f"OK [{r_pur.status_code}/{r_del.status_code}] (vc:{vc})"
+
+            # البحث عن رابط تحميل Google Play الرسمي داخل رد Delivery
+            dl_links = re.findall(rb"(https://[^\x00-\x1f\"\'\s<>]+(?:play\.googleapis\.com|gvt1\.com)[^\x00-\x1f\"\'\s<>]+)", r_del.content)
+            if dl_links:
+                g_url = dl_links[0].decode("utf-8", errors="ignore")
+                subprocess.run(["curl", "-L", "-s", "--max-time", "30", "-o", apk_path, g_url], check=False)
                 if os.path.exists(apk_path) and os.path.getsize(apk_path) > 1000000:
-                    downloaded = True
+                    downloaded_src = "GooglePlay_CDN"
+        except Exception:
+            store_status = "Done"
+
+    # إذا لم يعطِ المتجر رابط تحميل مباشر، نسحب من APKPure
+    if not downloaded_src:
+        ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        for u in [
+            f"https://d.apkpure.net/b/XAPK/{package_name}?version=latest",
+            f"https://d.apkpure.net/b/APK/{package_name}?version=latest"
+        ]:
+            try:
+                subprocess.run(["curl", "-L", "-s", "-A", ua, "--max-time", "30", "-o", apk_path, u], check=False)
+                if os.path.exists(apk_path) and os.path.getsize(apk_path) > 2000000:
+                    downloaded_src = "Mirror_XAPK"
                     break
             except Exception:
                 pass
 
-        if not downloaded:
-            return [], [], "DL_Skip"
+    if downloaded_src and os.path.exists(apk_path):
+        cands, cgkis = deep_scan_apk_file(apk_path, package_name)
+        src_label = f"{downloaded_src}(IDs:{len(cands)},Cgk:{len(cgkis)})"
+        if cands or cgkis:
+            EXTRACTED_CACHE[package_name] = {
+                "store_status": store_status,
+                "cands": cands,
+                "cgkis": cgkis,
+                "src": src_label
+            }
+        return store_status, cands, cgkis, src_label
 
-        try:
-            with zipfile.ZipFile(apk_path, 'r') as z:
-                names = z.namelist()
-                base_apks = [n for n in names if n.endswith(".apk") and ("base" in n.lower() or pkg_name in n.lower())]
-                if base_apks:
-                    z.extract(base_apks[0], "/tmp")
-                    apk_path = os.path.join("/tmp", base_apks[0])
-        except Exception:
-            pass
-
-        try:
-            subprocess.run(["apktool", "d", "-s", "-f", apk_path, "-o", out_dir], timeout=45, check=False)
-        except Exception:
-            pass
-
-    candidate_ids = []
-    found_cgkis = []
-    # قائمة المعرفات المستبعدة (مثل معرف فيسبوك 334926755014 ومعرف Play Games العام)
-    blacklist_ids = {"334926755014", "590296086962"}
-
-    # 1. البحث الشامل باستخدام grep داخل كل ملفات XML في الحزمة المفكوكة
-    try:
-        grep_cgk = subprocess.check_output(
-            ["grep", "-rnE", "CgkI[A-Za-z0-9_-]{12,22}", out_dir],
-            text=True, stderr=subprocess.DEVNULL
-        )
-        for c in re.findall(r"(CgkI[A-Za-z0-9_-]{12,22})", grep_cgk):
-            if c not in found_cgkis and not c.startswith("CgkIsunb0aQR"):
-                found_cgkis.append(c)
-    except Exception:
-        pass
-
-    search_files = [
-        os.path.join(out_dir, "AndroidManifest.xml"),
-        os.path.join(out_dir, "res", "values", "strings.xml"),
-        os.path.join(out_dir, "res", "values", "ids.xml")
-    ]
-
-    for fpath in search_files:
-        if os.path.exists(fpath):
-            try:
-                with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
-                    content = f.read()
-
-                    # أ) البحث المباشر عن com.google.android.gms.games.APP_ID في المانيفست
-                    for m in re.finditer(r'com\.google\.android\.gms\.games\.APP_ID"[^>]*value="([^"]+)"', content):
-                        val = m.group(1)
-                        nums = re.findall(r"(\d{10,13})", val)
-                        for n in nums:
-                            if n not in blacklist_ids and n not in candidate_ids:
-                                candidate_ids.append(n)
-
-                    # ب) البحث في strings.xml عن حقول Google / Games / App / Project (مع تجاهل facebook تماماً)
-                    for m in re.finditer(r'<string name="([^"]+)">([^<]+)</string>', content):
-                        k_name = m.group(1).lower()
-                        k_val = m.group(2).strip()
-                        if "facebook" in k_name or "fb_" in k_name:
-                            continue
-                        nums = re.findall(r"\b(\d{11,13})\b", k_val)
-                        for n in nums:
-                            if n not in blacklist_ids and n not in candidate_ids:
-                                # إعطاء الأولوية للحقول التي تحتوي على كلمة game أو app_id أو google أو gcm أو project
-                                if any(w in k_name for w in ["game", "app_id", "google", "gcm", "project", "default_web", "client"]):
-                                    candidate_ids.insert(0, n)
-                                else:
-                                    candidate_ids.append(n)
-            except Exception:
-                pass
-
-    # ج) إذا لم نجد في XML، نفحص ملفات assets أو الكود الثنائي بحثاً عن CgkI أو أرقام المشاريع
-    if not candidate_ids:
-        try:
-            grep_nums = subprocess.check_output(
-                ["grep", "-rnE", "[0-9]{11,13}-", out_dir],
-                text=True, stderr=subprocess.DEVNULL
-            )
-            for n in re.findall(r"\b(\d{11,13})-[a-z0-9]+\.apps\.googleusercontent\.com", grep_nums):
-                if n not in blacklist_ids and n not in candidate_ids:
-                    candidate_ids.insert(0, n)
-        except Exception:
-            pass
-
-    res_tuple = (candidate_ids[:8], found_cgkis, f"Candidates({len(candidate_ids)})")
-    if candidate_ids or found_cgkis:
-        EXTRACTED_CACHE[pkg_name] = res_tuple
-    return res_tuple
+    return store_status, [], [], "NoAPK_Downloaded"
 
 def execute_sync_flow(chat_id, msg_id, uid):
     session = user_sessions.get(uid)
@@ -402,7 +476,7 @@ def execute_sync_flow(chat_id, msg_id, uid):
         f"🔄 <b>Syncing: {chest['name']}</b>\n\n"
         f"👤 {masked_em}\n"
         "① Authenticating Google...\n"
-        "② Cloud APK Inspect & Store Install\n"
+        "② Deep Binary APK Scan & Store Install\n"
         "③ Chest Quests\n\n"
         "🌐 <i>Connecting to Google EmbeddedSetup...</i>"
     )
@@ -431,14 +505,15 @@ def execute_sync_flow(chat_id, msg_id, uid):
         f"🔄 <b>Syncing: {chest['name']}</b>\n\n"
         f"👤 {masked_em}\n"
         "🟢 ① Google OAuth2 [OK]\n"
-        "🔄 ② Scanning APK for Play Games ID (ignoring Facebook ID)...\n"
+        "🔄 ② Deep Scanning DEX & Assets for CgkI IDs...\n"
         "③ Chest Quests\n\n"
-        "☁️ <i>Decompiling & testing candidate Game IDs...</i>"
+        "☁️ <i>Extracting binary strings on GitHub server...</i>"
     )
     safe_edit(step2_text, chat_id, msg_id)
 
-    store_status = simulate_store_install(tokens.get("store_token"), chest["package"])
-    candidate_ids, apk_cgkis, ext_src = extract_app_id_from_cloud_apk(chest["package"])
+    store_status, candidate_ids, apk_cgkis, ext_src = simulate_store_install_and_extract(
+        tokens.get("store_token"), chest["package"]
+    )
 
     ok_ach, unlocked_names, diag_msg, winning_id = fetch_and_unlock_achievements(
         tokens, chest, candidate_ids, apk_cgkis, chat_id, msg_id, email
@@ -453,7 +528,8 @@ def execute_sync_flow(chat_id, msg_id, uid):
         f"🎁 <b>Chest:</b> {chest['name']}\n"
         f"📧 <b>Account:</b> {email}\n"
         f"☁️ <b>Cloud Install:</b> {store_status}\n"
-        f"🆔 <b>Candidate IDs:</b> {cand_str} ({ext_src})\n"
+        f"🔍 <b>Scan Source:</b> {ext_src}\n"
+        f"🆔 <b>Candidate IDs:</b> {cand_str}\n"
         f"✅ <b>Active Game ID:</b> {winning_id or 'None'}\n"
         f"🔑 <b>Play Games Sign-in:</b> {signin_code}\n"
         f"📡 <b>API Details:</b> {diag_msg}\n"
@@ -461,32 +537,6 @@ def execute_sync_flow(chat_id, msg_id, uid):
         "👉 Check <b>Google Play Store -> Play Points</b> now!"
     )
     safe_edit(done_text, chat_id, msg_id, reply_markup=retry_inline_keyboard())
-
-def simulate_store_install(store_token, package_name):
-    if not store_token:
-        return "Skipped"
-    headers = {
-        "Authorization": f"Bearer {store_token}",
-        "X-DFE-Device-Id": "396566cb13f27421",
-        "User-Agent": "Android-Finsky/38.2.28-29 (api=3,versionCode=83822800,sdk=33,device=pixel6,hardware=oriole,product=oriole)",
-        "Accept-Language": "en-US",
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
-    }
-    try:
-        r_pur = requests.post(
-            "https://android.clients.google.com/fdfe/purchase",
-            data=f"ot=1&doc={package_name}&vc=1",
-            headers=headers,
-            timeout=10
-        )
-        r_del = requests.get(
-            f"https://android.clients.google.com/fdfe/delivery?ot=1&doc={package_name}&vc=1",
-            headers=headers,
-            timeout=10
-        )
-        return f"OK [{r_pur.status_code}/{r_del.status_code}]"
-    except Exception:
-        return "Done"
 
 def simulate_game_signin(tokens, package_name, app_id=None):
     tok = tokens.get("game_pkg_token") or tokens.get("games_token")
@@ -704,9 +754,9 @@ def fetch_and_unlock_achievements(tokens, chest, candidate_ids, apk_cgkis, chat_
     diag_info = []
     winning_id = None
 
-    # 1. فتح أي معرف CgkI صريح تم العثور عليه في ملفات اللعبة
+    # 1. فتح أي معرف CgkI صريح تم العثور عليه في الفحص العميق
     if apk_cgkis:
-        diag_info.append(f"APK_CgkI({len(apk_cgkis)})")
+        diag_info.append(f"FoundCgkI({len(apk_cgkis)})")
         for idx, aid in enumerate(apk_cgkis[:15], start=1):
             for base_u in ["https://www.googleapis.com/games/v1whitelisted", "https://www.googleapis.com/games/v1"]:
                 try:
@@ -714,16 +764,18 @@ def fetch_and_unlock_achievements(tokens, chest, candidate_ids, apk_cgkis, chat_
                     if ru.status_code == 200:
                         unlocked_titles.append(f"{aid} [200]")
                         break
+                    elif idx == 1:
+                        err_m = ru.json().get("error", {}).get("message", "")[:30]
+                        diag_info.append(f"{aid[:8]}->{ru.status_code}:{err_m}")
                 except Exception:
                     pass
 
-    # 2. تجربة كل المعرفات المرشحة (Candidate IDs) المستخرجة من الحزمة حتى نجد المعرف الصحيح للعبة
+    # 2. تجربة كل المعرفات المرشحة الصالحة (التي تولد كود CgkI حقيقي)
     for cid in candidate_ids:
         gen_ids = generate_cgki_ids(cid)
         if not gen_ids:
             continue
 
-        # فحص أول معرف CgkI لهذا الرقم لمعرفة رد جوجل
         test_aid = gen_ids[0]
         cid_ok = False
         for base_u in ["https://www.googleapis.com/games/v1whitelisted", "https://www.googleapis.com/games/v1"]:
@@ -737,7 +789,7 @@ def fetch_and_unlock_achievements(tokens, chest, candidate_ids, apk_cgkis, chat_
                 else:
                     err_txt = ""
                     try:
-                        err_txt = ru.json().get("error", {}).get("message", "")[:35]
+                        err_txt = ru.json().get("error", {}).get("message", "")[:30]
                     except Exception:
                         pass
                     diag_info.append(f"ID({cid[:6]}..)->{ru.status_code}:{err_txt}")
@@ -756,8 +808,8 @@ def fetch_and_unlock_achievements(tokens, chest, candidate_ids, apk_cgkis, chat_
                         pass
             break
 
-    return bool(unlocked_titles), unlocked_titles, " | ".join(diag_info[:4]), winning_id
+    return bool(unlocked_titles), unlocked_titles, " | ".join(diag_info[:4]) if diag_info else "NoValidCgkI", winning_id
 
 if __name__ == "__main__":
-    print("Quest Helper Multi-ID Scanner Bot Started!")
+    print("Quest Helper Deep Binary Scanner Bot Started!")
     bot.infinity_polling(skip_pending=True)
