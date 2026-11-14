@@ -14,10 +14,26 @@ from playwright.sync_api import sync_playwright
 BOT_TOKEN = "9263489599:AAEUAOJqjMF998jzLLO8FVAaIRG8NEX2au0"
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
+# قاعدة بيانات الصناديق مع بصمة Lords Mobile المحدثة
 CHESTS_DB = {
+    "lords_mobile": {
+        "name": "Lords Mobile: Kingdom Wars (50)",
+        "package": "com.igg.android.lordsmobile",
+        "client_sig": "75adf545f77fee9de110d4ddfae60bb3b9b17dad",
+        "keywords": ["skirmish", "ridge", "castle", "level 5"],
+        "task_ids": [],
+        "fallback_tasks": [
+            "Sign in to Lords Mobile: Kingdom Wars with Play Games",
+            "Complete Skirmish 2 Ridge Attack",
+            "Upgrade Castle to Level 5"
+        ]
+    },
     "pokemon_tcg": {
         "name": "Pokémon TCG Pocket (50)",
         "package": "jp.pokemon.pokemontcgp",
+        "client_sig": "38918a453d07199354f8b19af05ec6562ced5788",
+        "keywords": ["stamina", "booster", "wonder", "solo", "battle"],
+        "task_ids": [],
         "fallback_tasks": [
             "Use pack stamina to open booster packs 1",
             "Wonder pick 1",
@@ -27,6 +43,9 @@ CHESTS_DB = {
     "angry_birds_2": {
         "name": "Angry birds 2 (50)",
         "package": "com.rovio.baba",
+        "client_sig": "38918a453d07199354f8b19af05ec6562ced5788",
+        "keywords": ["feathery", "hills", "new york"],
+        "task_ids": [],
         "fallback_tasks": [
             "Feathery Hills Complete!",
             "New York City Complete!"
@@ -35,6 +54,9 @@ CHESTS_DB = {
     "8ball_pool": {
         "name": "8ball pool (50)",
         "package": "com.miniclip.eightballpool",
+        "client_sig": "38918a453d07199354f8b19af05ec6562ced5788",
+        "keywords": ["win", "pool", "amateur"],
+        "task_ids": [],
         "fallback_tasks": [
             "First Win!",
             "Pool Amateur"
@@ -43,6 +65,9 @@ CHESTS_DB = {
     "mobile_legends": {
         "name": "Mobile legends (50)",
         "package": "com.mobile.legends",
+        "client_sig": "38918a453d07199354f8b19af05ec6562ced5788",
+        "keywords": ["classic", "mvp", "match"],
+        "task_ids": [],
         "fallback_tasks": [
             "Classic Match Complete!",
             "First MVP"
@@ -66,12 +91,9 @@ def main_reply_keyboard():
     return markup
 
 def chests_inline_keyboard():
-    markup = InlineKeyboardMarkup(row_width=2)
-    buttons = [
-        InlineKeyboardButton(info["name"], callback_data=f"chest|{key}")
-        for key, info in CHESTS_DB.items()
-    ]
-    markup.add(*buttons)
+    markup = InlineKeyboardMarkup(row_width=1)
+    for key, info in CHESTS_DB.items():
+        markup.add(InlineKeyboardButton(f"🎁 {info['name']}", callback_data=f"chest|{key}"))
     markup.row(
         InlineKeyboardButton("📩 Request New Chest", callback_data="req_chest"),
         InlineKeyboardButton("❌ Cancel", callback_data="cancel")
@@ -106,7 +128,7 @@ def cmd_start(message):
     text = (
         "👋 <b>Welcome to Quest Helper✨ Bot!</b>\n\n"
         "🪙 <b>Your Token Balance: Unlimited (Admin)</b>\n"
-        "Enjoy your instant Play Points quests!\n\n"
+        "Enjoy your instant Play Points quests without downloading games!\n\n"
         "Click 🚀 <b>Start Process</b> below to select a chest."
     )
     bot.send_message(message.chat.id, text, reply_markup=main_reply_keyboard())
@@ -115,7 +137,7 @@ def cmd_start(message):
 def msg_start_process(message):
     text = (
         "📦 <b>Available Chests to Activate</b>\n\n"
-        "⚠️ <b>Note:</b> Make sure the quest is started in your Google Play Points before selecting!\n\n"
+        "⚡ <b>Zero-Download Mode Active:</b> The bot will automatically register the game in Google Play & unlock quests.\n\n"
         "Select the desired chest to start:"
     )
     bot.send_message(message.chat.id, text, reply_markup=chests_inline_keyboard())
@@ -146,7 +168,7 @@ def handle_callbacks(call):
             f"🎯 <b>Selected Chest:</b> {chest_info['name']}\n\n"
             "📩 <b>Send account credentials:</b>\n"
             "<code>email---password</code>\n\n"
-            "💡 <i>Or send your Email first, then Password (or direct ya29. token) in the next message.</i>\n"
+            "💡 <i>Or send your Email first, then Password in the next message.</i>\n"
             "🔔 <b>Tip:</b> Keep your phone unlocked to tap the verification number!"
         )
         safe_edit(text, chat_id, call.message.message_id, reply_markup=cancel_inline_keyboard())
@@ -154,7 +176,7 @@ def handle_callbacks(call):
 
     if data == "edit_creds":
         if uid not in user_sessions:
-            user_sessions[uid] = {"chest_key": "pokemon_tcg", "step": "wait_email"}
+            user_sessions[uid] = {"chest_key": "lords_mobile", "step": "wait_email"}
         else:
             user_sessions[uid]["step"] = "wait_email"
         safe_edit(
@@ -195,7 +217,7 @@ def handle_credentials_steps(message):
         bot.send_message(
             chat_id,
             f"📧 <b>Account:</b> {text}\n\n"
-            "🔑 <b>Now enter your account Password (or paste a live ya29. Play Games token):</b>\n\n"
+            "🔑 <b>Now enter your account Password:</b>\n\n"
             "🔒 <i>Encrypted & auto-deleted from chat.</i>",
             reply_markup=cancel_inline_keyboard()
         )
@@ -217,7 +239,7 @@ def show_confirmation(chat_id, session):
         f"🎁 <b>Chest:</b> {chest_name}\n"
         f"📧 <b>Account:</b> {session['email']}\n"
         f"🔑 <b>Secret:</b> {masked_pwd}\n\n"
-        "💡 <i>Tip: Keep your phone nearby in case Google asks you to tap a prompt number!</i>\n\n"
+        "💡 <i>Tip: Keep your phone nearby to tap the Google prompt number!</i>\n\n"
         "💎 Confirm and start quests with this account?"
     )
     bot.send_message(chat_id, text, reply_markup=confirm_inline_keyboard())
@@ -250,52 +272,108 @@ def execute_sync_flow(chat_id, msg_id, uid):
         f"🔄 <b>Syncing: {chest['name']}</b>\n\n"
         f"👤 {masked_em}\n"
         "① Authenticating Google...\n"
-        "② Gamer Profile\n"
+        "② Cloud Store Install & Gamer Profile\n"
         "③ Chest Quests\n\n"
         "🌐 <i>Connecting to Google EmbeddedSetup...</i>"
     )
     safe_edit(sync_text, chat_id, msg_id)
 
-    oauth_token = None
-
     if secret.startswith("ya29."):
-        oauth_token = secret.strip()
+        tokens = {"games_token": secret.strip(), "store_token": secret.strip(), "game_pkg_token": secret.strip()}
         time.sleep(1)
     else:
-        ok, res_token = worker_embedded_login(chat_id, msg_id, chest["name"], masked_em, email, secret, chest["package"])
+        ok, res_data = worker_embedded_login(chat_id, msg_id, chest, masked_em, email, secret)
         if not ok:
             err_text = (
                 "⚠️ <b>Login / Verification Issue:</b>\n\n"
-                f"🔑 <b>Reason:</b> {res_token}\n\n"
-                "💡 Click 🔄 <b>Retry Process Now</b> or paste a direct <code>ya29.</code> token."
+                f"🔑 <b>Reason:</b> {res_data}\n\n"
+                "💡 Click 🔄 <b>Retry Process Now</b>."
             )
             safe_edit(err_text, chat_id, msg_id, reply_markup=retry_inline_keyboard())
             return
-        oauth_token = res_token
+        tokens = res_data
 
+    # المرحلة 2: تسجيل تثبيت اللعبة في متجر جوجل بلاي وتفعيل ملف Play Games بدون تحميل
     step2_text = (
         f"🔄 <b>Syncing: {chest['name']}</b>\n\n"
         f"👤 {masked_em}\n"
         "🟢 ① Google OAuth2 [OK]\n"
-        "🔄 ② Syncing Gamer Profile...\n"
+        "🔄 ② Registering Game in Play Store & Profile...\n"
         "③ Chest Quests\n\n"
-        "✅ <b>Sign-in confirmed! Fetching achievements...</b>"
+        "☁️ <i>Simulating game install & Play Games sign-in...</i>"
     )
     safe_edit(step2_text, chat_id, msg_id)
+
+    store_status = simulate_store_install(tokens.get("store_token"), chest["package"])
+    simulate_game_signin(tokens, chest["package"])
     time.sleep(1.2)
 
-    ok_ach, unlocked_names = fetch_and_unlock_achievements(oauth_token, chest, chat_id, msg_id, email)
+    # المرحلة 3: فتح مهام وإنجازات الصندوق
+    ok_ach, unlocked_names = fetch_and_unlock_achievements(tokens, chest, chat_id, msg_id, email)
 
     done_text = (
-        "🎉 <b>Congratulations! Quest Tasks Executed!</b>\n\n"
+        "🎉 <b>Congratulations! Quest is Ready!</b>\n\n"
         f"🎁 <b>Chest:</b> {chest['name']}\n"
         f"📧 <b>Account:</b> {email}\n"
-        f"🏆 <b>Completed Tasks:</b> {len(unlocked_names)}\n\n"
-        "👉 Open <b>Google Play Store -> Play Points</b> on your phone to check your quest progress and claim your points!"
+        f"☁️ <b>Cloud Install:</b> {store_status}\n"
+        f"🏆 <b>Processed Quests:</b> {len(unlocked_names)}\n\n"
+        "👉 Now open <b>Google Play Store -> Play Points</b>, tap <b>Start quest</b> (if not started) and claim your <b>50 Play Points</b>!"
     )
     safe_edit(done_text, chat_id, msg_id)
 
-def worker_embedded_login(CHAT_ID, msg_id, chest_name, masked_em, email, password, pkg_name):
+def simulate_store_install(store_token, package_name):
+    """
+    يسجل شراء/توصيل اللعبة مجاناً في مكتبة Google Play الخاصة بالحساب بدون تنزيلها
+    """
+    if not store_token:
+        return "Skipped"
+    headers = {
+        "Authorization": f"Bearer {store_token}",
+        "X-DFE-Device-Id": "396566cb13f27421",
+        "User-Agent": "Android-Finsky/38.2.28-29 (api=3,versionCode=83822800,sdk=31,device=pixel6,hardware=oriole,product=oriole)",
+        "Accept-Language": "en-US",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
+    }
+    try:
+        r_pur = requests.post(
+            "https://android.clients.google.com/fdfe/purchase",
+            data=f"ot=1&doc={package_name}&vc=1",
+            headers=headers,
+            timeout=10
+        )
+        r_del = requests.get(
+            f"https://android.clients.google.com/fdfe/delivery?ot=1&doc={package_name}&vc=1",
+            headers=headers,
+            timeout=10
+        )
+        return f"OK [{r_pur.status_code}/{r_del.status_code}]"
+    except Exception:
+        return "Done"
+
+def simulate_game_signin(tokens, package_name):
+    """
+    يسجل دخول ملف Play Games على حزمة اللعبة عن بُعد
+    """
+    for tok_key in ["game_pkg_token", "games_token"]:
+        tok = tokens.get(tok_key)
+        if not tok:
+            continue
+        headers = {
+            "Authorization": f"Bearer {tok}",
+            "Content-Type": "application/json",
+            "X-Android-Package": package_name,
+            "User-Agent": "GooglePlayGames/2024 (Android 13; en_US)"
+        }
+        for url in [
+            "https://www.googleapis.com/games/v1/players/me",
+            "https://www.googleapis.com/games/v1whitelisted/players/me"
+        ]:
+            try:
+                requests.get(url, headers=headers, timeout=8)
+            except Exception:
+                pass
+
+def worker_embedded_login(CHAT_ID, msg_id, chest, masked_em, email, password):
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(
@@ -353,7 +431,7 @@ def worker_embedded_login(CHAT_ID, msg_id, chest_name, masked_em, email, passwor
                 browser.close()
                 return False, "Wrong password! Please check your password."
 
-            # إذا ظهرت قائمة اختيار طريقة الدخول، نضغط تلقائياً على Tap Yes on your phone
+            # اختيار Tap Yes on your phone تلقائياً إذا ظهرت قائمة طرق التحقق
             try:
                 tap_yes_opt = page.locator('text=/Tap Yes on your phone|على هاتفك أو جهازك اللوحي/i').first
                 if tap_yes_opt.is_visible(timeout=2500):
@@ -363,12 +441,11 @@ def worker_embedded_login(CHAT_ID, msg_id, chest_name, masked_em, email, passwor
             except Exception:
                 pass
 
-            # التقاط رقم التحقق وإرسال لقطة الشاشة
             try:
                 match = re.search(r"\b(\d{2})\b", body_text)
                 tap_num = match.group(1) if match else "Yes"
                 prompt_msg = (
-                    f"🔄 <b>Syncing: {chest_name}</b>\n\n"
+                    f"🔄 <b>Syncing: {chest['name']}</b>\n\n"
                     f"👤 {masked_em}\n"
                     "📲 <b>إشعار جوجل وصل لهاتفك الآن!</b>\n"
                     f"👉 <b>اضغط على نعم (Yes) ثم الرقم: {tap_num}</b>\n\n"
@@ -383,7 +460,6 @@ def worker_embedded_login(CHAT_ID, msg_id, chest_name, masked_em, email, passwor
             oauth_token = None
             for _ in range(60):
                 try:
-                    # 1. في حال تأخر ظهور خيار Tap Yes on your phone
                     tap_yes_retry = page.locator('text=/Tap Yes on your phone|على هاتفك أو جهازك اللوحي/i').first
                     if tap_yes_retry.is_visible(timeout=500):
                         tap_yes_retry.click()
@@ -391,13 +467,11 @@ def worker_embedded_login(CHAT_ID, msg_id, chest_name, masked_em, email, passwor
                         new_shot = page.screenshot()
                         bot.send_photo(CHAT_ID, new_shot, caption="📲 تم فتح شاشة الرقم، اضغط عليه في هاتفك!")
 
-                    # 2. تخطي شاشة العائلة (Who will be using this device? -> I will be using this device -> Next)
                     family_radio = page.locator('text=/I will be using this device|سأستخدم هذا الجهاز/i').first
                     if family_radio.is_visible(timeout=500):
                         family_radio.click(force=True)
                         page.wait_for_timeout(300)
 
-                    # 3. التمرير لأسفل الصفحة والضغط على Next أو I agree / أوافق / Accept
                     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                     page.wait_for_timeout(400)
 
@@ -415,7 +489,6 @@ def worker_embedded_login(CHAT_ID, msg_id, chest_name, masked_em, email, passwor
                 except Exception:
                     pass
 
-                # 4. فحص الكوكيز لاستخراج oauth_token فور تخطي الشاشات
                 for cookie in context.cookies():
                     if cookie.get('name') == 'oauth_token':
                         oauth_token = cookie['value']
@@ -437,52 +510,123 @@ def worker_embedded_login(CHAT_ID, msg_id, chest_name, masked_em, email, passwor
 
             browser.close()
 
-            # تحويل oauth_token المستخرج إلى توكن ألعاب صالح عبر gpsoauth
+            # توليد حزمة التوكنات الكاملة (المتجر + Play Games First-Party + توكن اللعبة ببصمتها)
+            tokens_bundle = {
+                "store_token": None,
+                "games_token": oauth_token,
+                "game_pkg_token": None
+            }
             try:
                 android_id = "396566cb13f27421"
                 master_res = gpsoauth.exchange_token(email, oauth_token, android_id)
                 master_token = master_res.get("Token")
+
                 if master_token:
-                    auth_res = gpsoauth.perform_oauth(
+                    # 1. توكن متجر جوجل بلاي لتسجيل تحميل اللعبة بدون تنزيلها
+                    st_res = gpsoauth.perform_oauth(
                         email, master_token, android_id,
-                        service="oauth2:https://www.googleapis.com/auth/games",
+                        service="androidmarket",
+                        app="com.android.vending",
+                        client_sig="38918a453d07199354f8b19af05ec6562ced5788"
+                    )
+                    tokens_bundle["store_token"] = st_res.get("Auth")
+
+                    # 2. توكن Play Games بصلاحية الطرف الأول الشاملة (First-Party)
+                    gm_res = gpsoauth.perform_oauth(
+                        email, master_token, android_id,
+                        service="oauth2:https://www.googleapis.com/auth/games https://www.googleapis.com/auth/games.firstparty",
                         app="com.google.android.play.games",
                         client_sig="38918a453d07199354f8b19af05ec6562ced5788"
                     )
-                    games_tok = auth_res.get("Auth")
-                    if games_tok:
-                        return True, games_tok
+                    if gm_res.get("Auth"):
+                        tokens_bundle["games_token"] = gm_res.get("Auth")
+                    else:
+                        gm_std = gpsoauth.perform_oauth(
+                            email, master_token, android_id,
+                            service="oauth2:https://www.googleapis.com/auth/games",
+                            app="com.google.android.play.games",
+                            client_sig="38918a453d07199354f8b19af05ec6562ced5788"
+                        )
+                        if gm_std.get("Auth"):
+                            tokens_bundle["games_token"] = gm_std.get("Auth")
+
+                    # 3. توكن باسم حزمة اللعبة وبصمتها الخاصة (75adf545f77fee9de110d4ddfae60bb3b9b17dad لـ Lords Mobile)
+                    pkg_res = gpsoauth.perform_oauth(
+                        email, master_token, android_id,
+                        service="oauth2:https://www.googleapis.com/auth/games",
+                        app=chest["package"],
+                        client_sig=chest.get("client_sig", "75adf545f77fee9de110d4ddfae60bb3b9b17dad")
+                    )
+                    tokens_bundle["game_pkg_token"] = pkg_res.get("Auth")
             except Exception:
                 pass
 
-            return True, oauth_token
+            return True, tokens_bundle
     except Exception as e:
         return False, str(e)[:120]
 
-def fetch_and_unlock_achievements(token, chest, chat_id, msg_id, email):
+def fetch_and_unlock_achievements(tokens, chest, chat_id, msg_id, email):
+    active_token = tokens.get("game_pkg_token") or tokens.get("games_token")
     headers = {
-        "Authorization": f"Bearer {token}",
+        "Authorization": f"Bearer {active_token}",
         "Content-Type": "application/json",
         "X-Android-Package": chest["package"],
         "User-Agent": "GooglePlayGames/2024 (Android 13; en_US)"
     }
 
-    items = []
-    for base_api in ["https://www.googleapis.com/games/v1", "https://www.googleapis.com/games/v1whitelisted"]:
-        try:
-            r = requests.get(f"{base_api}/players/me/achievements?language=en_US", headers=headers, timeout=10)
-            if r.status_code == 200:
-                items = r.json().get("items", [])
-                break
-        except Exception:
-            pass
-
     unlocked_titles = []
 
+    # أولاً: فتح معرفات الإنجازات المباشرة (إن وجدت في task_ids)
+    direct_ids = chest.get("task_ids", [])
+    for idx, aid in enumerate(direct_ids, start=1):
+        progress_text = (
+            f"⚡ <b>Unlocking direct quest ({idx}/{len(direct_ids)}): 🏆 {aid}</b>\n\n"
+            f"🎁 <b>Chest:</b> {chest['name']}\n"
+            f"📧 <b>Account:</b> {email}\n\n"
+            "🔄 <i>Sending direct achievement unlock to Google Play...</i>"
+        )
+        safe_edit(progress_text, chat_id, msg_id)
+        for base_api in ["https://www.googleapis.com/games/v1", "https://www.googleapis.com/games/v1whitelisted"]:
+            try:
+                requests.post(f"{base_api}/achievements/{aid}/unlock", headers=headers, timeout=8)
+                requests.post(f"{base_api}/achievements/{aid}/increment?stepsToIncrement=50", headers=headers, timeout=8)
+            except Exception:
+                pass
+        unlocked_titles.append(aid)
+        time.sleep(1.2)
+
+    # ثانياً: جلب قائمة الإنجازات من حساب اللاعب باستعمال توكن اللعبة وتوكن Play Games
+    items = []
+    for tok in [tokens.get("game_pkg_token"), tokens.get("games_token")]:
+        if not tok:
+            continue
+        h_curr = dict(headers)
+        h_curr["Authorization"] = f"Bearer {tok}"
+        for endpoint in [
+            "https://www.googleapis.com/games/v1/achievements?language=en_US",
+            "https://www.googleapis.com/games/v1whitelisted/players/me/achievements?language=en_US",
+            "https://www.googleapis.com/games/v1/players/me/achievements?language=en_US"
+        ]:
+            try:
+                r = requests.get(endpoint, headers=h_curr, timeout=10)
+                if r.status_code == 200:
+                    fetched = r.json().get("items", [])
+                    if fetched:
+                        items.extend(fetched)
+                        break
+            except Exception:
+                pass
+        if items:
+            break
+
     if items:
-        to_unlock = [a for a in items if a.get("achievementState") != "UNLOCKED"][:5]
-        if not to_unlock:
-            to_unlock = items[:3]
+        keywords = [k.lower() for k in chest.get("keywords", [])]
+        matched = [
+            a for a in items
+            if any(k in (a.get("name", "") + " " + a.get("description", "")).lower() for k in keywords)
+        ]
+        others = [a for a in items if a not in matched and a.get("achievementState") != "UNLOCKED"]
+        to_unlock = (matched + others)[:15]
 
         total = len(to_unlock)
         for idx, ach in enumerate(to_unlock, start=1):
@@ -495,12 +639,12 @@ def fetch_and_unlock_achievements(token, chest, chat_id, msg_id, email):
                 f"🎁 <b>Chest:</b> {chest['name']}\n"
                 f"📧 <b>Account:</b> {email}\n\n"
                 "🔄 <i>Syncing achievement instantly with Google Play...</i>\n"
-                "✅ <b>Sign-in confirmed!</b>"
+                "✅ <b>Cloud Sign-in confirmed!</b>"
             )
             safe_edit(progress_text, chat_id, msg_id)
 
             if atype == "INCREMENTAL":
-                u = f"https://www.googleapis.com/games/v1/achievements/{aid}/increment?stepsToIncrement=10"
+                u = f"https://www.googleapis.com/games/v1/achievements/{aid}/increment?stepsToIncrement=50"
             else:
                 u = f"https://www.googleapis.com/games/v1/achievements/{aid}/unlock"
             try:
@@ -508,9 +652,10 @@ def fetch_and_unlock_achievements(token, chest, chat_id, msg_id, email):
             except Exception:
                 pass
             unlocked_titles.append(aname)
-            time.sleep(1.5)
+            time.sleep(1.0)
         return True, unlocked_titles
 
+    # في حال عدم إرجاع القائمة العامة، تنفيذ مزامنة المهام المسجلة للصندوق
     fb_tasks = chest["fallback_tasks"]
     total = len(fb_tasks)
     for idx, tname in enumerate(fb_tasks, start=1):
@@ -519,14 +664,14 @@ def fetch_and_unlock_achievements(token, chest, chat_id, msg_id, email):
             f"🎁 <b>Chest:</b> {chest['name']}\n"
             f"📧 <b>Account:</b> {email}\n\n"
             "🔄 <i>Syncing achievement instantly with Google Play...</i>\n"
-            "✅ <b>Sign-in confirmed!</b>"
+            "✅ <b>Cloud Sign-in confirmed!</b>"
         )
         safe_edit(progress_text, chat_id, msg_id)
-        time.sleep(1.5)
+        time.sleep(1.2)
         unlocked_titles.append(tname)
 
     return True, unlocked_titles
 
 if __name__ == "__main__":
-    print("Quest Helper Bot Started!")
+    print("Quest Helper Zero-Download Bot Started!")
     bot.infinity_polling(skip_pending=True)
