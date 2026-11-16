@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import struct
 import base64
 import zipfile
 import subprocess
@@ -254,19 +255,19 @@ def safe_edit(text, chat_id, msg_id, reply_markup=None):
     except Exception:
         pass
 
+def encode_varint(val):
+    out = bytearray()
+    while val > 0x7f:
+        out.append((val & 0x7f) | 0x80)
+        val >>= 7
+    out.append(val & 0x7f)
+    return bytes(out)
+
 def generate_cgki_ids(app_id_str):
     try:
         app_id = int(app_id_str)
         if app_id < 10000000:
             return []
-        def encode_varint(val):
-            out = bytearray()
-            while val > 0x7f:
-                out.append((val & 0x7f) | 0x80)
-                val >>= 7
-            out.append(val & 0x7f)
-            return bytes(out)
-
         results = []
         for index in range(1, 30):
             raw = b'\x08' + encode_varint(app_id) + b'\x10\x01\x18' + encode_varint(index)
@@ -277,6 +278,67 @@ def generate_cgki_ids(app_id_str):
     except Exception:
         return []
 
+def perform_android_checkin(email, ac2dm_token):
+    """
+    ينفذ تسجيل جهاز أندرويد حقيقي (Android Checkin) لدى جوجل للحصول على GSF Android ID شرعي
+    يحول خطأ المتجر 401 إلى 200 OK ويسمح بتحميل الـ APK الرسمي من سيرفر جوجل بلاي!
+    """
+    # بناء حزمة Protobuf مبسطة لطلب Checkin لجهاز Pixel 6 (Android 13)
+    def pb_str(field_num, s):
+        b = s.encode("utf-8")
+        return encode_varint((field_num << 3) | 2) + encode_varint(len(b)) + b
+
+    def pb_varint(field_num, v):
+        return encode_varint((field_num << 3) | 0) + encode_varint(v)
+
+    build_proto = (
+        pb_str(1, "google/oriole/oriole:13/TQ3A.230805.001/10316531:user/release-keys") +
+        pb_str(2, "oriole") +
+        pb_str(3, "TP1A.220624.021") +
+        pb_str(4, "oriole") +
+        pb_str(6, "google") +
+        pb_varint(7, int(time.time()) - 864000) +
+        pb_varint(10, 33) +
+        pb_str(11, "Google") +
+        pb_str(12, "Pixel 6")
+    )
+
+    checkin_event = pb_str(1, "event_log_start") + pb_varint(3, int(time.time() * 1000))
+    checkin_proto = (
+        encode_varint((1 << 3) | 2) + encode_varint(len(build_proto)) + build_proto +
+        pb_varint(2, 0) +
+        encode_varint((3 << 3) | 2) + encode_varint(len(checkin_event)) + checkin_event
+    )
+
+    req_proto = (
+        pb_varint(2, 0) +
+        encode_varint((4 << 3) | 2) + encode_varint(len(checkin_proto)) + checkin_proto +
+        pb_str(6, "en_US") +
+        pb_varint(11, 3) +
+        pb_str(14, "358240051111110") +
+        pb_varint(20, 0)
+    )
+    if email and ac2dm_token:
+        req_proto += pb_str(15, f"[{email}]") + pb_str(15, ac2dm_token)
+
+    headers = {
+        "Content-Type": "application/x-protobuffer",
+        "User-Agent": "Android-Checkin/2.0 (oriole TQ3A.230805.001)"
+    }
+    try:
+        r = requests.post("https://android.clients.google.com/checkin", data=bytes(req_proto), headers=headers, timeout=12)
+        if r.status_code == 200 and len(r.content) > 8:
+            # قراءة الحقل رقم 7 (android_id: fixed64، التاج 0x39) من رد Protobuf
+            data = r.content
+            idx = data.find(b'\x39')
+            if idx != -1 and idx + 9 <= len(data):
+                aid_int = struct.unpack("<Q", data[idx+1:idx+9])[0]
+                if aid_int > 1000000000:
+                    return format(aid_int, 'x')
+    except Exception:
+        pass
+    return "396566cb13f27421"
+
 def extract_apk_signatures_and_clients(apk_path, pkg_name):
     extract_raw_dir = f"/tmp/raw_{pkg_name}"
     unzipped_apk_dir = f"/tmp/unapk_{pkg_name}"
@@ -285,8 +347,6 @@ def extract_apk_signatures_and_clients(apk_path, pkg_name):
     os.makedirs(unzipped_apk_dir, exist_ok=True)
 
     found_sigs = []
-    all_oauth_clients = []
-    client_secrets = []
     found_cgkis = []
 
     target_apk = apk_path
@@ -319,6 +379,20 @@ def extract_apk_signatures_and_clients(apk_path, pkg_name):
     else:
         unzipped_apk_dir = extract_raw_dir
 
+    # استخراج جميع بصمات SHA-1 (بما في ذلك APK Signature Scheme v2/v3 عبر keytool)
+    for apk_candidate in ([target_apk] + sub_apks[:2]):
+        try:
+            kt_out = subprocess.check_output(
+                ["keytool", "-printcert", "-jarfile", apk_candidate],
+                text=True, stderr=subprocess.DEVNULL, timeout=15
+            )
+            for m in re.findall(r"SHA1:\s*([0-9A-Fa-f:]{59})", kt_out):
+                clean_sig = m.replace(":", "").lower()
+                if clean_sig not in found_sigs:
+                    found_sigs.append(clean_sig)
+        except Exception:
+            pass
+
     for root, _, files in os.walk(unzipped_apk_dir):
         for fn in files:
             fpath = os.path.join(root, fn)
@@ -329,26 +403,17 @@ def extract_apk_signatures_and_clients(apk_path, pkg_name):
                         c_str = m.decode("utf-8", errors="ignore")
                         if c_str not in found_cgkis and not c_str.startswith("CgkIsunb0aQR"):
                             found_cgkis.append(c_str)
-                    for m in re.findall(rb"((\d{9,13})-[a-z0-9]{15,35}\.apps\.googleusercontent\.com)", data):
-                        full_cl = m[0].decode("utf-8", errors="ignore")
-                        if full_cl not in all_oauth_clients:
-                            all_oauth_clients.append(full_cl)
-                    # البحث عن Google OAuth Client Secret (GOCSPX-... أو 24 حرفاً)
-                    for m in re.findall(rb"\b(GOCSPX-[A-Za-z0-9_-]{20,35})\b", data):
-                        sec_s = m.decode("utf-8", errors="ignore")
-                        if sec_s not in client_secrets:
-                            client_secrets.append(sec_s)
             except Exception:
                 pass
 
-    return found_cgkis[:30], all_oauth_clients, client_secrets, found_sigs
+    return found_cgkis[:30], found_sigs
 
-def store_install_and_fetch_official_apk(store_token, chest):
+def store_install_and_fetch_official_apk(store_token, android_id_hex, chest):
     package_name = chest["package"]
     headers = {
         "Authorization": f"Bearer {store_token}",
-        "X-DFE-Device-Id": "396566cb13f27421",
-        "User-Agent": "Android-Finsky/38.2.28-29 (api=3,versionCode=83822800,sdk=33,device=pixel6,hardware=oriole,product=oriole)",
+        "X-DFE-Device-Id": android_id_hex,
+        "User-Agent": "Android-Finsky/38.2.28-29 (api=3,versionCode=83822800,sdk=33,device=oriole,hardware=oriole,product=oriole,platformVersionRelease=13,model=Pixel%206,buildId=TQ3A.230805.001,isWideScreen=0)",
         "Accept-Language": "en-US",
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
     }
@@ -360,6 +425,17 @@ def store_install_and_fetch_official_apk(store_token, chest):
     if store_token:
         try:
             vc = 220600000 if "lordsmobile" in package_name else 1
+            r_det = requests.get(f"https://android.clients.google.com/fdfe/details?doc={package_name}", headers=headers, timeout=10)
+            if r_det.status_code == 200:
+                for m in re.findall(rb"\x18([\x80-\xff]{2,4}[\x00-\x7f])", r_det.content):
+                    val, shift = 0, 0
+                    for b in m:
+                        val |= (b & 0x7f) << shift
+                        shift += 7
+                    if 100000 <= val <= 2140000000:
+                        vc = val
+                        break
+
             r_pur = requests.post(
                 "https://android.clients.google.com/fdfe/purchase",
                 data=f"ot=1&doc={package_name}&vc={vc}",
@@ -371,42 +447,48 @@ def store_install_and_fetch_official_apk(store_token, chest):
                 headers=headers,
                 timeout=10
             )
-            store_status = f"OK [{r_pur.status_code}/{r_del.status_code}]"
+            store_status = f"OK [{r_pur.status_code}/{r_del.status_code}] (GSF:{android_id_hex[:6]})"
+
+            # استخراج رابط تحميل Google Play CDN الرسمي من رد Delivery
+            dl_links = re.findall(rb"(https://[^\x00-\x1f\"\'\s<>]+(?:play\.googleapis\.com|gvt1\.com|android\.clients\.google\.com/market/download)[^\x00-\x1f\"\'\s<>]+)", r_del.content)
+            if dl_links:
+                g_url = dl_links[0].decode("utf-8", errors="ignore")
+                subprocess.run(["curl", "-L", "-s", "--max-time", "35", "-o", apk_path, g_url], check=False)
+                if os.path.exists(apk_path) and os.path.getsize(apk_path) > 1000000:
+                    downloaded_src = "PlayStore_CDN!"
         except Exception:
             store_status = "Err"
 
-    if package_name in EXTRACTED_CACHE:
+    if package_name in EXTRACTED_CACHE and not downloaded_src:
         cached = dict(EXTRACTED_CACHE[package_name])
         cached["store_status"] = store_status
         return cached
 
-    ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-    for u in [
-        f"https://d.apkpure.net/b/APK/{package_name}?version=latest",
-        f"https://d.apkpure.net/b/XAPK/{package_name}?version=latest"
-    ]:
-        try:
-            if not os.path.exists(apk_path) or os.path.getsize(apk_path) < 2000000:
-                subprocess.run(["curl", "-L", "-s", "-A", ua, "--max-time", "35", "-o", apk_path, u], check=False)
-            if os.path.exists(apk_path) and os.path.getsize(apk_path) > 2000000:
-                downloaded_src = "Mirror_Pkg"
-                break
-        except Exception:
-            pass
+    if not downloaded_src:
+        ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        for u in [
+            f"https://d.apkpure.net/b/APK/{package_name}?version=latest",
+            f"https://d.apkpure.net/b/XAPK/{package_name}?version=latest"
+        ]:
+            try:
+                if not os.path.exists(apk_path) or os.path.getsize(apk_path) < 2000000:
+                    subprocess.run(["curl", "-L", "-s", "-A", ua, "--max-time", "35", "-o", apk_path, u], check=False)
+                if os.path.exists(apk_path) and os.path.getsize(apk_path) > 2000000:
+                    downloaded_src = "Mirror_Pkg"
+                    break
+            except Exception:
+                pass
 
     if downloaded_src and os.path.exists(apk_path):
-        cgkis, clients, secrets_list, sigs = extract_apk_signatures_and_clients(apk_path, package_name)
-        for c_pre in chest.get("oauth_clients", []):
-            if c_pre not in clients:
-                clients.insert(0, c_pre)
+        cgkis, sigs = extract_apk_signatures_and_clients(apk_path, package_name)
+        if chest.get("client_sig") and chest["client_sig"] not in sigs:
+            sigs.append(chest["client_sig"])
 
         res_dict = {
             "store_status": store_status,
             "cgkis": cgkis,
-            "clients": clients,
-            "secrets": secrets_list,
             "sigs": sigs,
-            "src": f"{downloaded_src}(Cgk:{len(cgkis)},Sec:{len(secrets_list)})"
+            "src": f"{downloaded_src}(Cgk:{len(cgkis)},Sigs:{len(sigs)})"
         }
         EXTRACTED_CACHE[package_name] = res_dict
         return res_dict
@@ -414,37 +496,9 @@ def store_install_and_fetch_official_apk(store_token, chest):
     return {
         "store_status": store_status,
         "cgkis": generate_cgki_ids(chest.get("app_id", "307216063448")),
-        "clients": chest.get("oauth_clients", []),
-        "secrets": [],
         "sigs": [chest.get("client_sig")],
         "src": "Fallback"
     }
-
-def exchange_auth_code_for_token(client_id, code_val, redir_uri, secrets_list):
-    """
-    يحول كود التفويض (4/...) المستخرج من شاشة OOB أو localhost إلى توكن ya29 صالح لفتح الإنجازات
-    """
-    candidates_sec = [""] + list(secrets_list)
-    last_err = "NoResp"
-    for sec in candidates_sec:
-        payload = {
-            "client_id": client_id,
-            "code": code_val,
-            "redirect_uri": redir_uri,
-            "grant_type": "authorization_code"
-        }
-        if sec:
-            payload["client_secret"] = sec
-        try:
-            r = requests.post("https://oauth2.googleapis.com/token", data=payload, timeout=8)
-            j = r.json()
-            if "access_token" in j:
-                return j["access_token"], "TokenExchanged_OK!"
-            else:
-                last_err = j.get("error_description") or j.get("error") or str(r.status_code)
-        except Exception as e:
-            last_err = str(e)[:25]
-    return None, f"ExchErr({last_err[:25]})"
 
 def execute_sync_flow(chat_id, msg_id, uid):
     session = user_sessions.get(uid)
@@ -460,7 +514,7 @@ def execute_sync_flow(chat_id, msg_id, uid):
         f"🔄 <b>Syncing: {chest['name']}</b>\n\n"
         f"👤 {masked_em}\n"
         "① Google EmbeddedSetup Login...\n"
-        "② OAuth Code Flow (response_type=code)\n"
+        "② Real Android Checkin & Play Store CDN\n"
         "③ Unlocking Achievements\n\n"
         "🌐 <i>Connecting to Google EmbeddedSetup...</i>"
     )
@@ -473,7 +527,7 @@ def execute_sync_flow(chat_id, msg_id, uid):
             "game_specific_tokens": [secret.strip()],
             "auth_diag": "Direct_ya29"
         }
-        pkg_info = store_install_and_fetch_official_apk(secret.strip(), chest)
+        pkg_info = store_install_and_fetch_official_apk(secret.strip(), "396566cb13f27421", chest)
     else:
         ok, res_data = worker_embedded_login(chat_id, msg_id, chest, masked_em, email, secret)
         if not ok:
@@ -495,6 +549,7 @@ def execute_sync_flow(chat_id, msg_id, uid):
     )
 
     unlocked_list_str = "\n".join([f"  • {name}" for name in unlocked_names[:12]]) if unlocked_names else "  • None"
+    sigs_str = ", ".join(pkg_info.get("sigs", []))
 
     done_text = (
         "🎉 <b>Quest Execution Report</b>\n\n"
@@ -502,6 +557,7 @@ def execute_sync_flow(chat_id, msg_id, uid):
         f"📧 <b>Account:</b> {email}\n"
         f"☁️ <b>Cloud Install:</b> {pkg_info['store_status']}\n"
         f"🔍 <b>Scan:</b> {pkg_info['src']}\n"
+        f"🔐 <b>Extracted SHA1:</b> <code>{sigs_str}</code>\n"
         f"🔑 <b>Game Auth Diag:</b> {tokens.get('auth_diag')}\n"
         f"📡 <b>API Details:</b> {diag_msg}\n"
         f"🏆 <b>Unlocked Achievements ({len(unlocked_names)}):</b>\n{unlocked_list_str}\n\n"
@@ -527,24 +583,6 @@ def worker_embedded_login(CHAT_ID, msg_id, chest, masked_em, email, password):
                 locale="en-US"
             )
             page = context.new_page()
-
-            intercepted_tokens = []
-            intercepted_codes = []
-
-            def handle_req(req):
-                u = req.url
-                if "access_token=ya29." in u:
-                    m = re.search(r"access_token=(ya29\.[A-Za-z0-9_.-]+)", u)
-                    if m and m.group(1) not in intercepted_tokens:
-                        intercepted_tokens.append(m.group(1))
-                if "code=4/" in u or "code=4%2F" in u:
-                    m_c = re.search(r"code=(4(?:/|%2F)[A-Za-z0-9_.-]+)", u)
-                    if m_c:
-                        clean_c = requests.utils.unquote(m_c.group(1))
-                        if clean_c not in intercepted_codes:
-                            intercepted_codes.append(clean_c)
-
-            page.on("request", handle_req)
 
             page.goto("https://accounts.google.com/EmbeddedSetup", wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(2500)
@@ -671,13 +709,24 @@ def worker_embedded_login(CHAT_ID, msg_id, chest, masked_em, email, password):
 
             diag_parts = []
             try:
-                android_id = "396566cb13f27421"
-                master_res = gpsoauth.exchange_token(email, oauth_token, android_id, sdk_version=33)
+                # 1. الحصول على Master Token أولاً ثم توليد GSF Android ID شرعي عبر Checkin!
+                init_aid = "396566cb13f27421"
+                master_res = gpsoauth.exchange_token(email, oauth_token, init_aid, sdk_version=33)
                 master_token = master_res.get("Token")
 
                 if master_token:
+                    ac2dm_res = gpsoauth.perform_oauth(
+                        email, master_token, init_aid,
+                        service="ac2dm",
+                        app="com.google.android.gsf",
+                        client_sig=GMS_SIG,
+                        sdk_version=33
+                    )
+                    real_gsf_id = perform_android_checkin(email, ac2dm_res.get("Auth"))
+                    diag_parts.append(f"Checkin:{real_gsf_id[:6]}")
+
                     st_res = gpsoauth.perform_oauth(
-                        email, master_token, android_id,
+                        email, master_token, real_gsf_id,
                         service="androidmarket",
                         app="com.android.vending",
                         client_sig=GMS_SIG,
@@ -687,7 +736,7 @@ def worker_embedded_login(CHAT_ID, msg_id, chest, masked_em, email, password):
                     tokens_bundle["store_token"] = store_tok
 
                     gm_res = gpsoauth.perform_oauth(
-                        email, master_token, android_id,
+                        email, master_token, real_gsf_id,
                         service="oauth2:https://www.googleapis.com/auth/games https://www.googleapis.com/auth/games.firstparty",
                         app="com.google.android.play.games",
                         client_sig=GMS_SIG,
@@ -696,103 +745,30 @@ def worker_embedded_login(CHAT_ID, msg_id, chest, masked_em, email, password):
                     if gm_res.get("Auth"):
                         tokens_bundle["games_token"] = gm_res.get("Auth")
 
-                    pkg_info = store_install_and_fetch_official_apk(store_tok, chest)
+                    # 2. الشراء وسحب الـ APK الرسمي من متجر جوجل بلاي باستخدام real_gsf_id
+                    pkg_info = store_install_and_fetch_official_apk(store_tok, real_gsf_id, chest)
                     tokens_bundle["pkg_info"] = pkg_info
 
-                    # نركز على المعرف الخاص بـ Lords Mobile: 307216063448-mrqfsfq4i4di4f6vvtbh5hrcjtv5o69r
-                    lords_clients = [c for c in pkg_info.get("clients", []) if c.startswith("307216063448")]
-
-                    # التجارب: (redirect_uri, response_type)
-                    flow_attempts = [
-                        ("urn:ietf:wg:oauth:2.0:oob", "code"),
-                        ("http://localhost", "token"),
-                        ("http://localhost", "code"),
-                        ("http://127.0.0.1", "code")
-                    ]
-
-                    for cl_id in lords_clients:
-                        short_cl = cl_id.split("-")[1][:5]
-                        for redir, r_type in flow_attempts:
-                            intercepted_codes.clear()
-                            auth_url = (
-                                f"https://accounts.google.com/o/oauth2/v2/auth?"
-                                f"client_id={cl_id}&"
-                                f"redirect_uri={redir}&"
-                                f"response_type={r_type}&"
-                                f"scope=https://www.googleapis.com/auth/games"
-                            )
-                            try:
-                                page.goto(auth_url, wait_until="domcontentloaded", timeout=10000)
-                                page.wait_for_timeout(2000)
-                            except Exception:
-                                pass
-
-                            b_txt = ""
-                            try:
-                                b_txt = page.inner_text("body")
-                            except Exception:
-                                pass
-
-                            if any(err_w in b_txt for err_w in ["redirect_uri_mismatch", "invalid_request", "invalid_client", "Access blocked", "Authorization Error"]):
-                                continue
-
-                            # إذا لم تظهر رسالة خطأ، نصور الشاشة ونضغط على زر الموافقة!
-                            try:
-                                shot_ok = page.screenshot()
-                                bot.send_photo(CHAT_ID, shot_ok, caption=f"✅ شاشة موافقة حقيقية: {short_cl} ({r_type} | {redir})")
-                            except Exception:
-                                pass
-
-                            for _ in range(3):
-                                try:
-                                    allow_b = page.locator(
-                                        'button:has-text("Allow"), button:has-text("Continue"), '
-                                        'button:has-text("سماح"), button:has-text("متابعة"), '
-                                        'button:has-text("Sign in"), #submit_approve_access'
-                                    ).last
-                                    if allow_b.is_visible(timeout=1500):
-                                        allow_b.click(force=True)
-                                        page.wait_for_timeout(2500)
-                                except Exception:
-                                    pass
-
-                            # فحص ما إذا ظهر كود 4/... في عنوان الصفحة أو في حقل input (نظام OOB)
-                            try:
-                                page_blob = page.url + " " + page.title() + " " + page.content()
-                                m_code = re.search(r"\b(4/[A-Za-z0-9_/-]{25,120})\b", page_blob)
-                                if m_code:
-                                    intercepted_codes.append(m_code.group(1))
-                                m_ya = re.search(r"(ya29\.[A-Za-z0-9_.-]+)", page_blob)
-                                if m_ya:
-                                    intercepted_tokens.append(m_ya.group(1))
-                            except Exception:
-                                pass
-
-                            if intercepted_tokens:
-                                tokens_bundle["game_specific_tokens"].insert(0, intercepted_tokens[0])
-                                diag_parts.append(f"GotToken({short_cl})!")
-                                break
-
-                            if intercepted_codes:
-                                code_val = intercepted_codes[0]
-                                ex_tok, ex_msg = exchange_auth_code_for_token(
-                                    cl_id, code_val, redir, pkg_info.get("secrets", [])
-                                )
-                                diag_parts.append(f"Code({short_cl})->{ex_msg}")
-                                if ex_tok:
-                                    tokens_bundle["game_specific_tokens"].insert(0, ex_tok)
-                                    break
-
-                        if tokens_bundle["game_specific_tokens"]:
+                    # 3. تجربة كل بصمة SHA1 مستخرجة للحصول على توكن اللعبة
+                    for sig_c in pkg_info.get("sigs", []):
+                        r_g = gpsoauth.perform_oauth(
+                            email, master_token, real_gsf_id,
+                            service="oauth2:https://www.googleapis.com/auth/games",
+                            app=chest["package"],
+                            client_sig=sig_c,
+                            sdk_version=33
+                        )
+                        if r_g.get("Auth"):
+                            tokens_bundle["game_specific_tokens"].append(r_g["Auth"])
+                            diag_parts.append(f"SigOK({sig_c[:6]})!")
                             break
-
-                    if not diag_parts:
-                        diag_parts.append("NoFlowAccepted")
+                        else:
+                            diag_parts.append(f"Sig({sig_c[:5]}):{r_g.get('Error', '?')}")
             except Exception as ex:
                 diag_parts.append(f"Ex:{str(ex)[:20]}")
 
             if not tokens_bundle["pkg_info"]:
-                tokens_bundle["pkg_info"] = store_install_and_fetch_official_apk(None, chest)
+                tokens_bundle["pkg_info"] = store_install_and_fetch_official_apk(None, "396566cb13f27421", chest)
 
             tokens_bundle["auth_diag"] = " | ".join(diag_parts[:4])
             browser.close()
@@ -852,5 +828,5 @@ def fetch_and_unlock_achievements(tokens, chest, app_id, apk_cgkis, chat_id, msg
     return bool(unlocked_titles), unlocked_titles, " | ".join(diag_info[:5])
 
 if __name__ == "__main__":
-    print("Quest Helper OOB Code Flow Bot Started!")
+    print("Quest Helper Real Checkin & CDN Bot Started!")
     bot.infinity_polling(skip_pending=True)
