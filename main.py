@@ -14,7 +14,7 @@ from telebot.types import (
 )
 from playwright.sync_api import sync_playwright
 
-BOT_TOKEN = "9263489599:AAEUAOJqjMF998jzLLO8FVAaIRG8NEX2au0"
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
 GMS_SIG = "38918a453d07199354f8b19af05ec6562ced5788"
