@@ -286,6 +286,7 @@ def extract_apk_signatures_and_clients(apk_path, pkg_name):
 
     found_sigs = []
     all_oauth_clients = []
+    client_secrets = []
     found_cgkis = []
 
     target_apk = apk_path
@@ -318,18 +319,6 @@ def extract_apk_signatures_and_clients(apk_path, pkg_name):
     else:
         unzipped_apk_dir = extract_raw_dir
 
-    try:
-        kt_out = subprocess.check_output(
-            ["keytool", "-printcert", "-jarfile", target_apk],
-            text=True, stderr=subprocess.DEVNULL, timeout=15
-        )
-        for m in re.findall(r"SHA1:\s*([0-9A-Fa-f:]{59})", kt_out):
-            clean_sig = m.replace(":", "").lower()
-            if clean_sig not in found_sigs:
-                found_sigs.append(clean_sig)
-    except Exception:
-        pass
-
     for root, _, files in os.walk(unzipped_apk_dir):
         for fn in files:
             fpath = os.path.join(root, fn)
@@ -344,10 +333,15 @@ def extract_apk_signatures_and_clients(apk_path, pkg_name):
                         full_cl = m[0].decode("utf-8", errors="ignore")
                         if full_cl not in all_oauth_clients:
                             all_oauth_clients.append(full_cl)
+                    # البحث عن Google OAuth Client Secret (GOCSPX-... أو 24 حرفاً)
+                    for m in re.findall(rb"\b(GOCSPX-[A-Za-z0-9_-]{20,35})\b", data):
+                        sec_s = m.decode("utf-8", errors="ignore")
+                        if sec_s not in client_secrets:
+                            client_secrets.append(sec_s)
             except Exception:
                 pass
 
-    return found_cgkis[:30], all_oauth_clients, found_sigs
+    return found_cgkis[:30], all_oauth_clients, client_secrets, found_sigs
 
 def store_install_and_fetch_official_apk(store_token, chest):
     package_name = chest["package"]
@@ -401,19 +395,18 @@ def store_install_and_fetch_official_apk(store_token, chest):
             pass
 
     if downloaded_src and os.path.exists(apk_path):
-        cgkis, clients, sigs = extract_apk_signatures_and_clients(apk_path, package_name)
+        cgkis, clients, secrets_list, sigs = extract_apk_signatures_and_clients(apk_path, package_name)
         for c_pre in chest.get("oauth_clients", []):
             if c_pre not in clients:
                 clients.insert(0, c_pre)
-        if chest.get("client_sig") and chest["client_sig"] not in sigs:
-            sigs.append(chest["client_sig"])
 
         res_dict = {
             "store_status": store_status,
             "cgkis": cgkis,
             "clients": clients,
+            "secrets": secrets_list,
             "sigs": sigs,
-            "src": f"{downloaded_src}(Cgk:{len(cgkis)},Cl:{len(clients)})"
+            "src": f"{downloaded_src}(Cgk:{len(cgkis)},Sec:{len(secrets_list)})"
         }
         EXTRACTED_CACHE[package_name] = res_dict
         return res_dict
@@ -422,9 +415,36 @@ def store_install_and_fetch_official_apk(store_token, chest):
         "store_status": store_status,
         "cgkis": generate_cgki_ids(chest.get("app_id", "307216063448")),
         "clients": chest.get("oauth_clients", []),
+        "secrets": [],
         "sigs": [chest.get("client_sig")],
         "src": "Fallback"
     }
+
+def exchange_auth_code_for_token(client_id, code_val, redir_uri, secrets_list):
+    """
+    يحول كود التفويض (4/...) المستخرج من شاشة OOB أو localhost إلى توكن ya29 صالح لفتح الإنجازات
+    """
+    candidates_sec = [""] + list(secrets_list)
+    last_err = "NoResp"
+    for sec in candidates_sec:
+        payload = {
+            "client_id": client_id,
+            "code": code_val,
+            "redirect_uri": redir_uri,
+            "grant_type": "authorization_code"
+        }
+        if sec:
+            payload["client_secret"] = sec
+        try:
+            r = requests.post("https://oauth2.googleapis.com/token", data=payload, timeout=8)
+            j = r.json()
+            if "access_token" in j:
+                return j["access_token"], "TokenExchanged_OK!"
+            else:
+                last_err = j.get("error_description") or j.get("error") or str(r.status_code)
+        except Exception as e:
+            last_err = str(e)[:25]
+    return None, f"ExchErr({last_err[:25]})"
 
 def execute_sync_flow(chat_id, msg_id, uid):
     session = user_sessions.get(uid)
@@ -440,7 +460,7 @@ def execute_sync_flow(chat_id, msg_id, uid):
         f"🔄 <b>Syncing: {chest['name']}</b>\n\n"
         f"👤 {masked_em}\n"
         "① Google EmbeddedSetup Login...\n"
-        "② Testing All 5 OAuth Clients & Redirects\n"
+        "② OAuth Code Flow (response_type=code)\n"
         "③ Unlocking Achievements\n\n"
         "🌐 <i>Connecting to Google EmbeddedSetup...</i>"
     )
@@ -475,14 +495,13 @@ def execute_sync_flow(chat_id, msg_id, uid):
     )
 
     unlocked_list_str = "\n".join([f"  • {name}" for name in unlocked_names[:12]]) if unlocked_names else "  • None"
-    all_cl_str = "\n".join([f"  - <code>{c}</code>" for c in pkg_info.get("clients", [])])
 
     done_text = (
         "🎉 <b>Quest Execution Report</b>\n\n"
         f"🎁 <b>Chest:</b> {chest['name']}\n"
         f"📧 <b>Account:</b> {email}\n"
         f"☁️ <b>Cloud Install:</b> {pkg_info['store_status']}\n"
-        f"🌐 <b>All APK Clients ({len(pkg_info.get('clients', []))}):</b>\n{all_cl_str}\n"
+        f"🔍 <b>Scan:</b> {pkg_info['src']}\n"
         f"🔑 <b>Game Auth Diag:</b> {tokens.get('auth_diag')}\n"
         f"📡 <b>API Details:</b> {diag_msg}\n"
         f"🏆 <b>Unlocked Achievements ({len(unlocked_names)}):</b>\n{unlocked_list_str}\n\n"
@@ -510,12 +529,20 @@ def worker_embedded_login(CHAT_ID, msg_id, chest, masked_em, email, password):
             page = context.new_page()
 
             intercepted_tokens = []
+            intercepted_codes = []
+
             def handle_req(req):
                 u = req.url
                 if "access_token=ya29." in u:
                     m = re.search(r"access_token=(ya29\.[A-Za-z0-9_.-]+)", u)
                     if m and m.group(1) not in intercepted_tokens:
                         intercepted_tokens.append(m.group(1))
+                if "code=4/" in u or "code=4%2F" in u:
+                    m_c = re.search(r"code=(4(?:/|%2F)[A-Za-z0-9_.-]+)", u)
+                    if m_c:
+                        clean_c = requests.utils.unquote(m_c.group(1))
+                        if clean_c not in intercepted_codes:
+                            intercepted_codes.append(clean_c)
 
             page.on("request", handle_req)
 
@@ -672,60 +699,95 @@ def worker_embedded_login(CHAT_ID, msg_id, chest, masked_em, email, password):
                     pkg_info = store_install_and_fetch_official_apk(store_tok, chest)
                     tokens_bundle["pkg_info"] = pkg_info
 
-                    # فحص جميع الـ Clients مع redirect_uris مختلفة في المتصفح (بما فيها mrqfsfq...)
-                    valid_clients = pkg_info.get("clients", [])
-                    redirects = [
-                        "urn:ietf:wg:oauth:2.0:oob",
-                        "http://localhost",
-                        f"{chest['package']}:/oauth2redirect"
+                    # نركز على المعرف الخاص بـ Lords Mobile: 307216063448-mrqfsfq4i4di4f6vvtbh5hrcjtv5o69r
+                    lords_clients = [c for c in pkg_info.get("clients", []) if c.startswith("307216063448")]
+
+                    # التجارب: (redirect_uri, response_type)
+                    flow_attempts = [
+                        ("urn:ietf:wg:oauth:2.0:oob", "code"),
+                        ("http://localhost", "token"),
+                        ("http://localhost", "code"),
+                        ("http://127.0.0.1", "code")
                     ]
 
-                    for cl_id in valid_clients:
-                        short_cl = cl_id.split("-")[1][:5] if "-" in cl_id else cl_id[:5]
-                        for redir in redirects:
+                    for cl_id in lords_clients:
+                        short_cl = cl_id.split("-")[1][:5]
+                        for redir, r_type in flow_attempts:
+                            intercepted_codes.clear()
                             auth_url = (
                                 f"https://accounts.google.com/o/oauth2/v2/auth?"
                                 f"client_id={cl_id}&"
                                 f"redirect_uri={redir}&"
-                                f"response_type=token&"
+                                f"response_type={r_type}&"
                                 f"scope=https://www.googleapis.com/auth/games"
                             )
                             try:
-                                page.goto(auth_url, wait_until="domcontentloaded", timeout=8000)
-                                page.wait_for_timeout(1500)
+                                page.goto(auth_url, wait_until="domcontentloaded", timeout=10000)
+                                page.wait_for_timeout(2000)
+                            except Exception:
+                                pass
+
+                            b_txt = ""
+                            try:
                                 b_txt = page.inner_text("body")
-                                if "redirect_uri_mismatch" in b_txt:
-                                    continue
-                                elif "invalid_client" in b_txt:
-                                    diag_parts.append(f"{short_cl}:InvCl")
-                                    break
-                                else:
-                                    # وجدنا Client يقبل التوجيه بدون redirect_uri_mismatch!
-                                    shot_ok = page.screenshot()
-                                    bot.send_photo(CHAT_ID, shot_ok, caption=f"✅ شاشة موافقة صالحة للمعرف: {cl_id[:28]} ({redir})")
+                            except Exception:
+                                pass
+
+                            if any(err_w in b_txt for err_w in ["redirect_uri_mismatch", "invalid_request", "invalid_client", "Access blocked", "Authorization Error"]):
+                                continue
+
+                            # إذا لم تظهر رسالة خطأ، نصور الشاشة ونضغط على زر الموافقة!
+                            try:
+                                shot_ok = page.screenshot()
+                                bot.send_photo(CHAT_ID, shot_ok, caption=f"✅ شاشة موافقة حقيقية: {short_cl} ({r_type} | {redir})")
+                            except Exception:
+                                pass
+
+                            for _ in range(3):
+                                try:
                                     allow_b = page.locator(
                                         'button:has-text("Allow"), button:has-text("Continue"), '
-                                        'button:has-text("سماح"), button:has-text("متابعة"), #submit_approve_access'
+                                        'button:has-text("سماح"), button:has-text("متابعة"), '
+                                        'button:has-text("Sign in"), #submit_approve_access'
                                     ).last
                                     if allow_b.is_visible(timeout=1500):
                                         allow_b.click(force=True)
                                         page.wait_for_timeout(2500)
+                                except Exception:
+                                    pass
 
-                                    # التقاط التوكن من الرابط أو عنوان الصفحة
-                                    combined = page.url + " " + page.title() + " " + page.inner_text("body")
-                                    m_t = re.search(r"(ya29\.[A-Za-z0-9_.-]+)", combined)
-                                    if m_t:
-                                        intercepted_tokens.append(m_t.group(1))
-                                    break
+                            # فحص ما إذا ظهر كود 4/... في عنوان الصفحة أو في حقل input (نظام OOB)
+                            try:
+                                page_blob = page.url + " " + page.title() + " " + page.content()
+                                m_code = re.search(r"\b(4/[A-Za-z0-9_/-]{25,120})\b", page_blob)
+                                if m_code:
+                                    intercepted_codes.append(m_code.group(1))
+                                m_ya = re.search(r"(ya29\.[A-Za-z0-9_.-]+)", page_blob)
+                                if m_ya:
+                                    intercepted_tokens.append(m_ya.group(1))
                             except Exception:
                                 pass
 
-                        if intercepted_tokens:
-                            tokens_bundle["game_specific_tokens"].insert(0, intercepted_tokens[0])
-                            diag_parts.append(f"WebOK({short_cl})!")
+                            if intercepted_tokens:
+                                tokens_bundle["game_specific_tokens"].insert(0, intercepted_tokens[0])
+                                diag_parts.append(f"GotToken({short_cl})!")
+                                break
+
+                            if intercepted_codes:
+                                code_val = intercepted_codes[0]
+                                ex_tok, ex_msg = exchange_auth_code_for_token(
+                                    cl_id, code_val, redir, pkg_info.get("secrets", [])
+                                )
+                                diag_parts.append(f"Code({short_cl})->{ex_msg}")
+                                if ex_tok:
+                                    tokens_bundle["game_specific_tokens"].insert(0, ex_tok)
+                                    break
+
+                        if tokens_bundle["game_specific_tokens"]:
                             break
+
                     if not diag_parts:
-                        diag_parts.append("AllClientsMismatch")
+                        diag_parts.append("NoFlowAccepted")
             except Exception as ex:
                 diag_parts.append(f"Ex:{str(ex)[:20]}")
 
@@ -757,7 +819,7 @@ def fetch_and_unlock_achievements(tokens, chest, app_id, apk_cgkis, chat_id, msg
             "Content-Type": "application/json",
             "User-Agent": "GooglePlayGames/2024 (Android 13; en_US)"
         }
-        for idx, aid in enumerate(target_cgkis[:15], start=1):
+        for idx, aid in enumerate(target_cgkis[:18], start=1):
             try:
                 ru = requests.post(f"https://www.googleapis.com/games/v1/achievements/{aid}/unlock", headers=h_game, timeout=6)
                 if ru.status_code == 200:
@@ -790,5 +852,5 @@ def fetch_and_unlock_achievements(tokens, chest, app_id, apk_cgkis, chat_id, msg
     return bool(unlocked_titles), unlocked_titles, " | ".join(diag_info[:5])
 
 if __name__ == "__main__":
-    print("Quest Helper Multi-Client Scanner Started!")
+    print("Quest Helper OOB Code Flow Bot Started!")
     bot.infinity_polling(skip_pending=True)
