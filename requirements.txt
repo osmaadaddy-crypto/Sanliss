@@ -2,3 +2,5 @@ pyTelegramBotAPI==4.22.1
 requests==2.32.3
 playwright==1.48.0
 gpsoauth==1.1.1
+protobuf
+pyOpenSSL
