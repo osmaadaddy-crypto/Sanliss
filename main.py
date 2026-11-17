@@ -275,47 +275,75 @@ def generate_cgki_ids(app_id_str):
     except Exception:
         return []
 
-# 1. استخراج التوكن مع حفظ سجل الأخطاء الكامل القادم من خادم جوجل بشكل آمن
+# 1. استخراج التوكن مع تضمين معاملات Google Play Services الإلزامية
 def request_play_games_tokens_with_debug(email, master_token, android_id, chest):
     pkg = chest["package"]
     sig = chest["client_sig"]
-    web_cl = chest.get("web_client", "307216063448-mrqfsfq4i4di4f6vvtbh5hrcjtv5o69r.apps.googleusercontent.com")
     found_tokens = []
     diag_logs = []
     full_error_details = []
 
-    attempts = [
-        ("PGS_v1", {
+    # تجارب تمرير Google Play Services (com.google.android.gms) كما طلب الخادم في رسالة الخطأ
+    gms_Configs = [
+        ("GMS_Delegated_Games", {
+            "accountType": "HOSTED_OR_GOOGLE",
+            "Email": email,
+            "has_permission": 1,
+            "EncryptedPasswd": master_token,
             "service": "oauth2:https://www.googleapis.com/auth/games",
+            "source": "android",
+            "androidId": android_id,
             "app": pkg,
-            "client_sig": sig
+            "client_sig": sig,
+            "callerPkg": "com.google.android.gms",
+            "callerSig": GMS_SIG,
+            "google_play_services_version": 240812000,
+            "sdk_version": 33,
+            "device_country": "us",
+            "operatorCountry": "us",
+            "lang": "en"
         }),
-        ("PGS_Lite", {
+        ("GMS_Delegated_Lite", {
+            "accountType": "HOSTED_OR_GOOGLE",
+            "Email": email,
+            "has_permission": 1,
+            "EncryptedPasswd": master_token,
             "service": "oauth2:https://www.googleapis.com/auth/games_lite",
+            "source": "android",
+            "androidId": android_id,
             "app": pkg,
-            "client_sig": sig
+            "client_sig": sig,
+            "callerPkg": "com.google.android.play.games",
+            "callerSig": GMS_SIG,
+            "google_play_services_version": 240812000,
+            "sdk_version": 33,
+            "device_country": "us",
+            "operatorCountry": "us",
+            "lang": "en"
         }),
-        ("ServerCode", {
-            "service": f"oauth2:server:client_id:{web_cl}:api_scope:https://www.googleapis.com/auth/games",
-            "app": pkg,
-            "client_sig": sig
-        }),
-        ("GMS_Proxy", {
+        ("PlayGames_App", {
+            "accountType": "HOSTED_OR_GOOGLE",
+            "Email": email,
+            "has_permission": 1,
+            "EncryptedPasswd": master_token,
             "service": "oauth2:https://www.googleapis.com/auth/games https://www.googleapis.com/auth/games.firstparty",
-            "app": "com.google.android.gms",
-            "client_sig": GMS_SIG
+            "source": "android",
+            "androidId": android_id,
+            "app": "com.google.android.play.games",
+            "client_sig": GMS_SIG,
+            "callerPkg": "com.google.android.gms",
+            "callerSig": GMS_SIG,
+            "google_play_services_version": 240812000,
+            "sdk_version": 33,
+            "device_country": "us",
+            "operatorCountry": "us",
+            "lang": "en"
         })
     ]
 
-    for label, params in attempts:
+    for label, payload in gms_Configs:
         try:
-            r = gpsoauth.perform_oauth(
-                email, master_token, android_id,
-                service=params["service"],
-                app=params["app"],
-                client_sig=params["client_sig"],
-                sdk_version=33
-            )
+            r = gpsoauth._perform_auth_request(payload, proxies=None)
             if r.get("Auth"):
                 tok = r["Auth"]
                 found_tokens.append((label, tok))
@@ -323,14 +351,14 @@ def request_play_games_tokens_with_debug(email, master_token, android_id, chest)
             else:
                 err_short = r.get("Error", "Unknown")
                 diag_logs.append(f"{label}:{err_short}")
-                full_error_details.append(f"[{label} | app={params['app']}]\n{json.dumps(r, ensure_ascii=False)}")
+                full_error_details.append(f"[{label}]\n{json.dumps(r, ensure_ascii=False)}")
         except Exception as e:
             diag_logs.append(f"{label}:Ex")
             full_error_details.append(f"[{label} Exception]\n{str(e)}")
 
     return found_tokens, " | ".join(diag_logs), "\n\n".join(full_error_details)
 
-# 2. المرحلة الثالثة: اختبار نقاط النهاية وتوثيق ردود الخادم
+# 2. المرحلة الثالثة: استخدام التوكن بدون تعارض الترويسات (لحل خطأ HTTP 400)
 def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, chat_id):
     fp_tok = tokens_bundle.get("games_token")
     spec_list = tokens_bundle.get("game_specific_tokens", [])
@@ -340,40 +368,47 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
     api_error_logs = []
 
     candidate_tokens = list(spec_list)
-    if fp_tok and not any(lbl == "GMS_Proxy" for lbl, _ in candidate_tokens):
-        candidate_tokens.append(("PlayGames_FP", fp_tok))
+    if fp_tok and not any(lbl == "PlayGames_App" for lbl, _ in candidate_tokens):
+        candidate_tokens.append(("PlayGames_FirstParty", fp_tok))
 
     if not candidate_tokens:
         return False, [], [], "لم يتم استخراج أي توكن صالح للاتصال بواجهة Play Games."
 
     for tok_label, g_tok in candidate_tokens:
-        headers_game = {
-            "Authorization": f"Bearer {g_tok}",
-            "Content-Type": "application/json",
-            "X-Android-Package": chest["package"],
-            "X-Android-Cert": chest["client_sig"],
-            "User-Agent": "GooglePlayGames/2024 (Android 13; en_US)"
-        }
+        # إذا كان التوكن صادراً لتطبيق PlayGames_App، لا نرسل X-Android-Package الخاص باللعبة لتجنب خطأ HTTP 400!
+        if "PlayGames" in tok_label:
+            headers_req = {
+                "Authorization": f"Bearer {g_tok}",
+                "Content-Type": "application/json",
+                "User-Agent": "GooglePlayGames/2024 (Android 13; en_US)"
+            }
+        else:
+            headers_req = {
+                "Authorization": f"Bearer {g_tok}",
+                "Content-Type": "application/json",
+                "X-Android-Package": chest["package"],
+                "X-Android-Cert": chest["client_sig"],
+                "User-Agent": "GooglePlayGames/2024 (Android 13; en_US)"
+            }
 
-        # أ: اختبار تسجيل تشغيل اللعبة
+        # أ: اختبار تسجيل تشغيل اللعبة (بدون ترويسات متعارضة)
         try:
             r_play = requests.post(
                 f"https://games.googleapis.com/games/v1whitelisted/applications/{app_id}/played",
-                headers=headers_game, json={}, timeout=6
+                headers=headers_req, json={}, timeout=6
             )
-            if r_play.status_code not in [200, 204]:
-                api_error_logs.append(
-                    f"[{tok_label}] POST applications/{app_id}/played (HTTP {r_play.status_code}):\n{r_play.text[:220]}"
-                )
+            api_error_logs.append(
+                f"[{tok_label}] POST applications/{app_id}/played -> HTTP {r_play.status_code}:\n{r_play.text[:200]}"
+            )
         except Exception as e:
             api_error_logs.append(f"[{tok_label}] خطأ اتصال played: {str(e)[:100]}")
 
-        # ب: جلب قائمة تعريفات الإنجازات
+        # ب: جلب قائمة إنجازات اللعبة من مسار اللاعب (players/me/achievements) ومن مسار التعريفات
         discovered_ids = []
         try:
             r_defs = requests.get(
-                f"https://games.googleapis.com/games/v1/achievementDefinitions?applicationId={app_id}&language=en_US",
-                headers=headers_game, timeout=8
+                "https://games.googleapis.com/games/v1/achievementDefinitions?language=en_US",
+                headers=headers_req, timeout=8
             )
             if r_defs.status_code == 200:
                 items = r_defs.json().get("items", [])
@@ -383,20 +418,20 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
                         discovered_ids.append((aid, it.get("name", aid)))
             else:
                 api_error_logs.append(
-                    f"[{tok_label}] GET achievementDefinitions (HTTP {r_defs.status_code}):\n{r_defs.text[:220]}"
+                    f"[{tok_label}] GET achievementDefinitions -> HTTP {r_defs.status_code}:\n{r_defs.text[:200]}"
                 )
         except Exception as e:
             api_error_logs.append(f"[{tok_label}] خطأ جلب القائمة: {str(e)[:100]}")
 
         if not discovered_ids:
-            discovered_ids = [(cid, f"Quest_{cid[-4:]}") for cid in target_cgkis[:8]]
+            discovered_ids = [(cid, f"Quest_{cid[-4:]}") for cid in target_cgkis[:6]]
 
-        # ج: إرسال طلبات فتح الإنجازات
+        # ج: إرسال طلبات فتح الإنجازات (unlock)
         first_unlock_err_logged = False
-        for aid, aname in discovered_ids[:8]:
+        for aid, aname in discovered_ids[:6]:
             url_unlock = f"https://games.googleapis.com/games/v1/achievements/{aid}/unlock"
             try:
-                ru = requests.post(url_unlock, headers=headers_game, json={}, timeout=6)
+                ru = requests.post(url_unlock, headers=headers_req, json={}, timeout=6)
                 if ru.status_code == 200:
                     resp_j = ru.json()
                     newly = resp_j.get("newlyUnlocked", False)
@@ -405,7 +440,7 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
                 elif not first_unlock_err_logged:
                     first_unlock_err_logged = True
                     api_error_logs.append(
-                        f"[{tok_label}] POST achievements/{aid}/unlock (HTTP {ru.status_code}):\n{ru.text[:300]}"
+                        f"[{tok_label}] POST achievements/{aid}/unlock -> HTTP {ru.status_code}:\n{ru.text[:300]}"
                     )
             except Exception as e:
                 if not first_unlock_err_logged:
@@ -433,10 +468,9 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
         except Exception:
             pass
 
-    full_err_report = "\n\n".join(api_error_logs[:4]) if api_error_logs else "لا توجد أخطاء."
+    full_err_report = "\n\n".join(api_error_logs[:5]) if api_error_logs else "لا توجد أخطاء."
     return len(unlocked_game_achs) > 0, unlocked_game_achs, unlocked_pg_achs, full_err_report
 
-# 3. دالة التنفيذ الرئيسية مع تنظيف HTML لإرسال سجل التشخيص بأمان
 def execute_sync_flow(chat_id, msg_id, uid):
     session = user_sessions.get(uid)
     if not session:
@@ -451,8 +485,8 @@ def execute_sync_flow(chat_id, msg_id, uid):
         f"🔄 <b>Stage 1/3: Logging into Google ({chest['name']})</b>\n\n"
         f"👤 {html.escape(masked_em)}\n"
         "① Authenticating via EmbeddedSetup...\n"
-        "② Extracting Play Games OAuth Tokens...\n"
-        "③ Fetching & Unlocking Game Achievements...",
+        "② Requesting Token via GMS CallerPkg...\n"
+        "③ Calling Play Games API...",
         chat_id, msg_id
     )
 
@@ -468,8 +502,7 @@ def execute_sync_flow(chat_id, msg_id, uid):
         if not ok:
             err_text = (
                 "❌ <b>فشل في المرحلة 1 (تسجيل الدخول):</b>\n\n"
-                f"📋 <b>السبب المباشر:</b>\n<code>{html.escape(str(res_data))}</code>\n\n"
-                "💡 تم إرسال صورة شاشة المتصفح أعلاه لتوضيح مكان التوقف."
+                f"📋 <b>السبب المباشر:</b>\n<code>{html.escape(str(res_data))}</code>"
             )
             safe_edit(err_text, chat_id, msg_id, reply_markup=retry_inline_keyboard())
             return
@@ -493,7 +526,7 @@ def execute_sync_flow(chat_id, msg_id, uid):
     game_list_str = "\n".join([f"  • {name}" for name in game_achs]) if game_achs else "  • ❌ <b>لم يتم فتح أي إنجاز خاص باللعبة (انظر تقرير الخطأ أدناه)</b>"
     pg_list_str = "\n".join([f"  • {name}" for name in pg_achs]) if pg_achs else "  • None"
 
-    status_header = "✅ <b>تم تنفيذ المهام بنجاح!</b>" if ok_game else "⚠️ <b>اكتمل الفحص مع وجود خطأ في المرحلة 3 (لم تُفتح مهام اللعبة)</b>"
+    status_header = "✅ <b>تم تنفيذ المهام بنجاح!</b>" if ok_game else "⚠️ <b>اكتمل الفحص مع وجود خطأ في المرحلة 3</b>"
 
     done_text = (
         f"{status_header}\n\n"
@@ -507,7 +540,6 @@ def execute_sync_flow(chat_id, msg_id, uid):
     )
     safe_edit(done_text, chat_id, msg_id, reply_markup=retry_inline_keyboard())
 
-    # إرسال رسالة التشخيص بعد تنظيف النصوص عبر html.escape لضمان عدم رفضها من تيليجرام
     if not ok_game:
         safe_oauth = html.escape(str(tokens.get('oauth_err_details') or 'لا توجد أخطاء'))
         safe_stage3 = html.escape(str(stage3_err_report))
@@ -523,8 +555,7 @@ def execute_sync_flow(chat_id, msg_id, uid):
         )
         try:
             bot.send_message(chat_id, debug_msg, parse_mode="HTML")
-        except Exception as send_err:
-            # في حال حدوث أي مشكلة غير متوقعة في التنسيق، يتم إرسالها كنص عادي بدون parse_mode
+        except Exception:
             bot.send_message(chat_id, f"🔍 تقرير التشخيص الخام:\n\n1) OAuth:\n{tokens.get('oauth_err_details')}\n\n2) API:\n{stage3_err_report}"[:4000], parse_mode=None)
 
 def worker_embedded_login(CHAT_ID, msg_id, chest, masked_em, email, password):
@@ -565,9 +596,9 @@ def worker_embedded_login(CHAT_ID, msg_id, chest, masked_em, email, password):
             pwd_loc = page.locator('input[type="password"], input[name="Passwd"]').first
             if not pwd_loc.is_visible():
                 shot = page.screenshot()
-                bot.send_photo(CHAT_ID, shot, caption="❌ توقف عند إدخال الإيميل (صورة الخطأ من المتصفح)")
+                bot.send_photo(CHAT_ID, shot, caption="❌ توقف عند إدخال الإيميل")
                 browser.close()
-                return False, "لم يظهر حقل كلمة المرور (قد يكون الإيميل غير صحيح أو طلب CAPTCHA)."
+                return False, "لم يظهر حقل كلمة المرور."
 
             pwd_loc.fill(password)
             page.wait_for_timeout(500)
@@ -582,10 +613,8 @@ def worker_embedded_login(CHAT_ID, msg_id, chest, masked_em, email, password):
 
             body_text = page.inner_text("body")
             if "Wrong password" in body_text or "كلمة المرور غير صحيحة" in body_text:
-                shot = page.screenshot()
-                bot.send_photo(CHAT_ID, shot, caption="❌ كلمة المرور غير صحيحة")
                 browser.close()
-                return False, "كلمة المرور التي أدخلتها غير صحيحة."
+                return False, "كلمة المرور غير صحيحة."
 
             try:
                 tap_yes_opt = page.locator('text=/Tap Yes on your phone|على هاتفك أو جهازك اللوحي/i').first
@@ -653,8 +682,6 @@ def worker_embedded_login(CHAT_ID, msg_id, chest, masked_em, email, password):
                 page.wait_for_timeout(1000)
 
             if not oauth_token:
-                shot = page.screenshot()
-                bot.send_photo(CHAT_ID, shot, caption="❌ انتهت مهلة الـ 60 ثانية، هذه آخر شاشة توقف عندها المتصفح")
                 browser.close()
                 return False, "انتهت مهلة 60 ثانية دون الحصول على كوكي oauth_token."
 
@@ -672,20 +699,13 @@ def worker_embedded_login(CHAT_ID, msg_id, chest, masked_em, email, password):
                 master_token = master_res.get("Token")
 
                 if master_token:
-                    gm_res = gpsoauth.perform_oauth(
-                        email, master_token, android_id,
-                        service="oauth2:https://www.googleapis.com/auth/games https://www.googleapis.com/auth/games.firstparty",
-                        app="com.google.android.play.games",
-                        client_sig=GMS_SIG,
-                        sdk_version=33
-                    )
-                    if gm_res.get("Auth"):
-                        tokens_bundle["games_token"] = gm_res.get("Auth")
-
                     v2_toks, v2_diag, full_errs = request_play_games_tokens_with_debug(
                         email, master_token, android_id, chest
                     )
                     tokens_bundle["game_specific_tokens"] = v2_toks
+                    for lbl, tk in v2_toks:
+                        if lbl == "PlayGames_App":
+                            tokens_bundle["games_token"] = tk
                     tokens_bundle["auth_diag"] = v2_diag
                     tokens_bundle["oauth_err_details"] = full_errs
                 else:
@@ -701,5 +721,5 @@ def worker_embedded_login(CHAT_ID, msg_id, chest, masked_em, email, password):
         return False, str(e)[:120]
 
 if __name__ == "__main__":
-    print("Quest Helper Stage-3 Real Debugger Started!")
+    print("Quest Helper GMS-Delegated Debugger Started!")
     bot.infinity_polling(skip_pending=True)
