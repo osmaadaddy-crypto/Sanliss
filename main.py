@@ -25,14 +25,9 @@ CHESTS_DB = {
         "app_id": "307216063448",
         "version_code": 710,
         "client_sig": LORDS_SIG_SHA1,
-        "keywords": ["skirmish", "ridge", "castle", "level 5", "perilous"],
-        "task_ids": [
-            "CgkIxunC0YcJEAIQAQ",
-            "CgkIxunC0YcJEAIQAg",
-            "CgkIxunC0YcJEAIQAw",
-            "CgkIxunC0YcJEAIQBA",
-            "CgkIxunC0YcJEAIQBQ"
-        ]
+        # تم تحديث الكلمات المفتاحية لتشمل مهام Play Points
+        "keywords": ["skirmish", "ridge", "castle", "level 5", "perilous", "fix", "door", "decorate", "rainbow"],
+        "task_ids": [] # نتركها فارغة لأن البوت سيجلبها ديناميكياً
     },
     "whiteout_survival": {
         "name": "Whiteout Survival (50)",
@@ -306,16 +301,63 @@ def request_play_games_v2_tokens(email, master_token, android_id, chest):
 
     return found_tokens, " | ".join(diag_logs)
 
-# 2. دالة التلاعب بالـ API (API Spoofing) لفتح الإنجازات والدعوات + XP Play Games
+# 2. دالة جديدة: جلب وتصفية الإنجازات ديناميكياً (الطريقة الثالثة)
+def fetch_and_filter_achievements(access_token, chest):
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "X-Android-Package": chest["package"],
+        "X-Android-Cert": chest["client_sig"],
+    }
+    url = "https://games.googleapis.com/games/v1/players/me/achievements?language=en_US"
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            return None, f"Failed_Fetch:{response.status_code}"
+            
+        items = response.json().get("items", [])
+        if not items:
+            return None, "No_Items"
+
+        matched_ids = []
+        for ach in items:
+            ach_name = ach.get("name", "").lower()
+            ach_desc = ach.get("description", "").lower()
+            
+            # مطابقة الكلمات المفتاحية
+            for keyword in chest.get("keywords", []):
+                if keyword.lower() in ach_name or keyword.lower() in ach_desc:
+                    matched_ids.append(ach["id"])
+                    break 
+                    
+        return matched_ids, "OK"
+    except Exception as e:
+        return None, str(e)[:20]
+
+# 3. دالة التلاعب بالـ API (API Spoofing) بدون وضع المحاكاة
 def execute_api_spoofing(tokens, chest, app_id, target_cgkis):
     spec_toks = tokens.get("game_specific_tokens", [])
     fp_tok = tokens.get("games_token")
     unlocked_titles = []
     diag_info = []
 
-    # أ. إذا توفر توكن مخصص للعبة، ننفذ طلبات games.googleapis.com مع ترويسات X-Android-Cert
-    if spec_toks and spec_toks[0] != "ya29.MOCK_TOKEN_FOR_EXAM":
+    if spec_toks:
         g_tok = spec_toks[0]
+        
+        # أ. محاولة جلب الإنجازات ديناميكياً (الطريقة الثالثة)
+        diag_info.append("Fetching Achievements...")
+        filtered_ids, fetch_status = fetch_and_filter_achievements(g_tok, chest)
+        
+        if filtered_ids:
+            target_cgkis = filtered_ids
+            diag_info.append(f"Found_{len(filtered_ids)}_tasks")
+        else:
+            diag_info.append(f"Fallback_to_Hardcoded")
+            # إذا فشل الجلب، نستخدم المعرفات الافتراضية الموجودة في الدالة
+            if not target_cgkis:
+                target_cgkis = generate_cgki_ids(app_id)
+
         headers = {
             "Authorization": f"Bearer {g_tok}",
             "Content-Type": "application/json",
@@ -324,17 +366,8 @@ def execute_api_spoofing(tokens, chest, app_id, target_cgkis):
             "User-Agent": "GooglePlayGames/2024 (Android 13; en_US)"
         }
 
-        if len(target_cgkis) > 3:
-            invite_achievement = target_cgkis[3]
-            url_invite = f"https://games.googleapis.com/games/v1/achievements/{invite_achievement}/unlock"
-            try:
-                r_inv = requests.post(url_invite, headers=headers, json={}, timeout=5)
-                if r_inv.status_code == 200:
-                    unlocked_titles.append("🤝 دعوة صديق (API Spoofed) [200]")
-            except Exception:
-                pass
-
-        for aid in target_cgkis[:4]:
+        # ب. إرسال طلبات الفتح الحقيقية
+        for aid in target_cgkis:
             url_unlock = f"https://games.googleapis.com/games/v1/achievements/{aid}/unlock"
             try:
                 r = requests.post(url_unlock, headers=headers, json={}, timeout=5)
@@ -345,7 +378,7 @@ def execute_api_spoofing(tokens, chest, app_id, target_cgkis):
             except Exception:
                 pass
 
-    # ب. فتح إنجازات و XP تطبيق Play Games الحقيقية بحساب المستخدم
+    # ج. فتح إنجازات و XP تطبيق Play Games الحقيقي
     if fp_tok:
         h_fp = {
             "Authorization": f"Bearer {fp_tok}",
@@ -365,18 +398,10 @@ def execute_api_spoofing(tokens, chest, app_id, target_cgkis):
         except Exception:
             pass
 
-    # ج. إذا لم يقبل الخادم التوكن المخصص بسبب قيد الشهادة، نكمل محاكاة الإنجازات لعرض المشروع بنجاح
-    if not any("🎯" in t for t in unlocked_titles):
-        unlocked_titles = [
-            "🤝 دعوة صديق (API Spoofed) [200]",
-            f"🎯 إنجاز {target_cgkis[0][-5:]} [200]",
-            f"🎯 إنجاز {target_cgkis[1][-5:]} [200]"
-        ] + unlocked_titles
-        diag_info.insert(0, "Spoofed_200_OK")
-
+    # تم حذف وضع المحاكاة (Mocking) تماماً. إذا لم ينجح أي طلب، سيعرض البوت فشلاً.
     return len(unlocked_titles) > 0, unlocked_titles, " | ".join(diag_info[:3])
 
-# 3. دالة التنفيذ الرئيسية
+# 4. دالة التنفيذ الرئيسية
 def execute_sync_flow(chat_id, msg_id, uid):
     session = user_sessions.get(uid)
     if not session:
@@ -392,7 +417,7 @@ def execute_sync_flow(chat_id, msg_id, uid):
         f"👤 {masked_em}\n"
         "① Extracting Master Token...\n"
         "② Spoofing Device Headers (X-Android-Cert)...\n"
-        "③ Bypassing Quest Verification...",
+        "③ Fetching & Unlocking Quests...",
         chat_id, msg_id
     )
 
@@ -407,19 +432,21 @@ def execute_sync_flow(chat_id, msg_id, uid):
         if ok:
             tokens = res_data
         else:
-            # في حال عدم توفر الهاتف للتأكيد أثناء العرض، ينتقل لوضع المحاكاة تلقائياً
-            time.sleep(2)
-            tokens = {
-                "games_token": None,
-                "game_specific_tokens": ["ya29.MOCK_TOKEN_FOR_EXAM"],
-                "auth_diag": "Mocked_API"
-            }
+            # إيقاف المحاكاة: في حال فشل تسجيل الدخول، يظهر خطأ حقيقي
+            err_msg = (
+                "❌ <b>فشل تسجيل الدخول أو تم حظر الطلب.</b>\n\n"
+                f"🔑 <b>السبب:</b> {res_data}\n\n"
+                "💡 <b>نصيحة:</b> يمكنك استخدام توكن (ya29) مباشر بدلاً من الباسورد."
+            )
+            safe_edit(err_msg, chat_id, msg_id, reply_markup=retry_inline_keyboard())
+            user_sessions.pop(uid, None)
+            return
 
     active_app_id = chest.get("app_id", "307216063448")
     target_cgkis = chest.get("task_ids") or generate_cgki_ids(active_app_id)
 
     ok_ach, unlocked_names, diag_msg = execute_api_spoofing(tokens, chest, active_app_id, target_cgkis)
-    unlocked_list_str = "\n".join([f"  • {name}" for name in unlocked_names])
+    unlocked_list_str = "\n".join([f"  • {name}" for name in unlocked_names]) if unlocked_names else "  • ❌ لم يتم فتح أي إنجاز (فشل الطلب)"
 
     done_text = (
         "🎉 <b>Quest & API Spoofing Report</b>\n\n"
@@ -433,6 +460,7 @@ def execute_sync_flow(chat_id, msg_id, uid):
         "👉 <i>Check Google Play Store -> Play Points & Play Games XP now!</i>"
     )
     safe_edit(done_text, chat_id, msg_id, reply_markup=retry_inline_keyboard())
+    user_sessions.pop(uid, None)
 
 def worker_embedded_login(CHAT_ID, msg_id, chest, masked_em, email, password):
     try:
@@ -594,5 +622,5 @@ def worker_embedded_login(CHAT_ID, msg_id, chest, masked_em, email, password):
         return False, str(e)[:80]
 
 if __name__ == "__main__":
-    print("Quest Helper API Spoofing Bot Started!")
+    print("Quest Helper API Spoofing Bot (Dynamic Fetch) Started!")
     bot.infinity_polling(skip_pending=True)
