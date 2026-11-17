@@ -1,7 +1,6 @@
 import os
 import re
 import time
-import base64
 import threading
 import requests
 import gpsoauth
@@ -12,84 +11,36 @@ from telebot.types import (
 )
 from playwright.sync_api import sync_playwright
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
+# توقيع تطبيق Google Play Games (ضروري جداً لتجاوز الحظر)
 GMS_SIG = "38918a453d07199354f8b19af05ec6562ced5788"
+# توقيع لعبة Lords Mobile
 LORDS_SIG_SHA1 = "75adf545f77fee9de110d4ddfae60bb3b9b17dad"
 
 CHESTS_DB = {
     "lords_mobile": {
         "name": "Lords Mobile: Kingdom Wars (50)",
         "package": "com.igg.android.lordsmobile",
-        "app_id": "307216063448",
-        "version_code": 710,
         "client_sig": LORDS_SIG_SHA1,
-        # تم تحديث الكلمات المفتاحية لتشمل مهام Play Points
-        "keywords": ["skirmish", "ridge", "castle", "level 5", "perilous", "fix", "door", "decorate", "rainbow"],
-        "task_ids": [] # نتركها فارغة لأن البوت سيجلبها ديناميكياً
-    },
-    "whiteout_survival": {
-        "name": "Whiteout Survival (50)",
-        "package": "com.gof.global",
-        "app_id": "307216063448",
-        "version_code": 1,
-        "client_sig": GMS_SIG,
-        "keywords": ["furnace", "hero", "chapter", "survive"],
-        "task_ids": []
-    },
-    "pokemon_tcg": {
-        "name": "Pokémon TCG Pocket (50)",
-        "package": "jp.pokemon.pokemontcgp",
-        "app_id": None,
-        "version_code": 1,
-        "client_sig": GMS_SIG,
-        "keywords": ["stamina", "booster", "wonder", "solo", "battle"],
-        "task_ids": []
-    },
-    "angry_birds_2": {
-        "name": "Angry birds 2 (50)",
-        "package": "com.rovio.baba",
-        "app_id": None,
-        "version_code": 1,
-        "client_sig": GMS_SIG,
-        "keywords": ["feathery", "hills", "new york"],
-        "task_ids": []
-    },
-    "8ball_pool": {
-        "name": "8ball pool (50)",
-        "package": "com.miniclip.eightballpool",
-        "app_id": None,
-        "version_code": 1,
-        "client_sig": GMS_SIG,
-        "keywords": ["win", "pool", "amateur"],
-        "task_ids": []
+        "keywords": ["skirmish", "ridge", "castle", "level 5", "perilous", "friend"]
     }
 }
 
 user_sessions = {}
 
+# --- واجهات Telegram ---
 def main_reply_keyboard():
     markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.row(KeyboardButton("🚀 Start Process"))
-    markup.add(
-        KeyboardButton("🪙 Balance & Recharge"),
-        KeyboardButton("🎁 Rewards Hub"),
-        KeyboardButton("📊 History & Stats"),
-        KeyboardButton("ℹ️ Guide & Terms"),
-        KeyboardButton("💬 Support"),
-        KeyboardButton("🌐 Change Language")
-    )
     return markup
 
 def chests_inline_keyboard():
     markup = InlineKeyboardMarkup(row_width=1)
     for key, info in CHESTS_DB.items():
         markup.add(InlineKeyboardButton(f"🎁 {info['name']}", callback_data=f"chest|{key}"))
-    markup.row(
-        InlineKeyboardButton("📩 Request New Chest", callback_data="req_chest"),
-        InlineKeyboardButton("❌ Cancel", callback_data="cancel")
-    )
+    markup.add(InlineKeyboardButton("❌ Cancel", callback_data="cancel"))
     return markup
 
 def cancel_inline_keyboard():
@@ -110,76 +61,49 @@ def retry_inline_keyboard():
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(
         InlineKeyboardButton("🔄 Retry Process Now", callback_data="confirm_run"),
-        InlineKeyboardButton("✏️ Edit / Re-enter Credentials", callback_data="edit_creds"),
         InlineKeyboardButton("❌ Cancel Process", callback_data="cancel")
     )
     return markup
 
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
-    text = (
-        "👋 <b>Welcome to Quest Helper✨ Bot!</b>\n\n"
-        "🪙 <b>Your Token Balance: Unlimited (Admin)</b>\n"
-        "Enjoy your instant Play Points quests!\n\n"
-        "Click 🚀 <b>Start Process</b> below to select a chest."
-    )
-    bot.send_message(message.chat.id, text, reply_markup=main_reply_keyboard())
+    bot.send_message(message.chat.id, "👋 Welcome to Quest Helper!\n\nClick 🚀 Start Process below.", reply_markup=main_reply_keyboard())
 
 @bot.message_handler(func=lambda m: m.text == "🚀 Start Process")
 def msg_start_process(message):
-    text = (
-        "📦 <b>Available Chests to Activate</b>\n\n"
-        "Select the desired chest to start:"
-    )
-    bot.send_message(message.chat.id, text, reply_markup=chests_inline_keyboard())
+    bot.send_message(message.chat.id, "📦 <b>Available Chests:</b>", reply_markup=chests_inline_keyboard())
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callbacks(call):
     uid = call.from_user.id
     chat_id = call.message.chat.id
-    data = call.data
-
-    if data == "cancel":
+    
+    if call.data == "cancel":
         user_sessions.pop(uid, None)
-        safe_edit(
-            "❌ <b>Process Cancelled.</b>\nClick 🚀 <b>Start Process</b> whenever you are ready.",
-            chat_id, call.message.message_id
-        )
+        safe_edit("❌ <b>Process Cancelled.</b>", chat_id, call.message.message_id)
         return
 
-    if data == "req_chest":
-        bot.answer_callback_query(call.id, "Send the package name to admin to add it!", show_alert=True)
-        return
-
-    if data.startswith("chest|"):
-        chest_key = data.split("|")[1]
+    if call.data.startswith("chest|"):
+        chest_key = call.data.split("|")[1]
         chest_info = CHESTS_DB[chest_key]
         user_sessions[uid] = {"chest_key": chest_key, "step": "wait_email"}
         text = (
-            f"🎯 <b>Selected Chest:</b> {chest_info['name']}\n\n"
-            "📩 <b>Send account credentials:</b>\n"
-            "<code>email---password</code>\n\n"
-            "💡 <i>Or send your Email first, then Password in the next message.</i>\n"
-            "🔔 <b>Tip:</b> Keep your phone unlocked to tap the verification number!"
+            f"🎯 <b>Selected:</b> {chest_info['name']}\n\n"
+            "📩 <b>Send credentials:</b>\n<code>email---password</code>\n\n"
+            "🔔 <b>Tip:</b> Keep your phone unlocked for the Google prompt!"
         )
         safe_edit(text, chat_id, call.message.message_id, reply_markup=cancel_inline_keyboard())
         return
 
-    if data == "edit_creds":
-        if uid not in user_sessions:
-            user_sessions[uid] = {"chest_key": "lords_mobile", "step": "wait_email"}
-        else:
-            user_sessions[uid]["step"] = "wait_email"
-        safe_edit(
-            "✏️ <b>Send <code>email---password</code> (or <code>email---ya29.token</code>):</b>",
-            chat_id, call.message.message_id, reply_markup=cancel_inline_keyboard()
-        )
+    if call.data == "edit_creds":
+        user_sessions[uid]["step"] = "wait_email"
+        safe_edit("✏️ <b>Send <code>email---password</code>:</b>", chat_id, call.message.message_id, reply_markup=cancel_inline_keyboard())
         return
 
-    if data == "confirm_run":
+    if call.data == "confirm_run":
         session = user_sessions.get(uid)
         if not session or "email" not in session or "password" not in session:
-            bot.answer_callback_query(call.id, "Session expired. Click Start Process again!", show_alert=True)
+            bot.answer_callback_query(call.id, "Session expired. Try again!", show_alert=True)
             return
         threading.Thread(target=execute_sync_flow, args=(chat_id, call.message.message_id, uid)).start()
 
@@ -190,437 +114,210 @@ def handle_credentials_steps(message):
     session = user_sessions[uid]
     text = message.text.strip()
 
-    if "---" in text and session.get("step") in ["wait_email", "wait_password"]:
+    if "---" in text:
         email, pwd = text.split("---", 1)
         session["email"] = email.strip()
         session["password"] = pwd.strip()
         session["step"] = "confirm"
-        try:
-            bot.delete_message(chat_id, message.message_id)
-        except Exception:
-            pass
-        show_confirmation(chat_id, session)
-        return
-
-    if session.get("step") == "wait_email":
-        session["email"] = text
-        session["step"] = "wait_password"
-        bot.send_message(
-            chat_id,
-            f"📧 <b>Account:</b> {text}\n\n"
-            "🔑 <b>Now enter your account Password:</b>\n\n"
-            "🔒 <i>Encrypted & auto-deleted from chat.</i>",
-            reply_markup=cancel_inline_keyboard()
+        try: bot.delete_message(chat_id, message.message_id)
+        except: pass
+        
+        pwd = session["password"]
+        masked_pwd = pwd[:3] + "••••" + pwd[-2:] if len(pwd) > 5 else "••••••"
+        text = (
+            "☑️ <b>Confirm Credentials:</b>\n\n"
+            f"🎁 <b>Chest:</b> {CHESTS_DB[session['chest_key']]['name']}\n"
+            f"📧 <b>Account:</b> {session['email']}\n"
+            f"🔑 <b>Secret:</b> {masked_pwd}\n\n"
+            "💎 Confirm and start quests with this account?"
         )
-    elif session.get("step") == "wait_password":
-        session["password"] = text
-        session["step"] = "confirm"
-        try:
-            bot.delete_message(chat_id, message.message_id)
-        except Exception:
-            pass
-        show_confirmation(chat_id, session)
-
-def show_confirmation(chat_id, session):
-    chest_name = CHESTS_DB[session["chest_key"]]["name"]
-    pwd = session["password"]
-    masked_pwd = pwd[:3] + "••••" + pwd[-2:] if len(pwd) > 5 else "••••••"
-    text = (
-        "☑️ <b>Confirm Credentials:</b>\n\n"
-        f"🎁 <b>Chest:</b> {chest_name}\n"
-        f"📧 <b>Account:</b> {session['email']}\n"
-        f"🔑 <b>Secret:</b> {masked_pwd}\n\n"
-        "💡 <i>Tip: Keep your phone nearby to tap the Google prompt number!</i>\n\n"
-        "💎 Confirm and start quests with this account?"
-    )
-    bot.send_message(chat_id, text, reply_markup=confirm_inline_keyboard())
+        bot.send_message(chat_id, text, reply_markup=confirm_inline_keyboard())
 
 def mask_email(email):
-    if "@" not in email:
-        return email
+    if "@" not in email: return email
     parts = email.split("@")
-    if len(parts[0]) > 3:
-        return parts[0][:2] + "****" + parts[0][-1] + "@" + parts[1]
-    return email
+    return parts[0][:2] + "****" + parts[0][-1] + "@" + parts[1] if len(parts[0]) > 3 else email
 
 def safe_edit(text, chat_id, msg_id, reply_markup=None):
+    try: bot.edit_message_text(text, chat_id, msg_id, reply_markup=reply_markup)
+    except: pass
+
+# --- 1. طلب التوكن (تم إصلاح ServiceDisab) ---
+def request_play_games_token(email, master_token, android_id):
     try:
-        bot.edit_message_text(text, chat_id, msg_id, reply_markup=reply_markup)
-    except Exception:
-        pass
+        # نطلب التوكن باسم تطبيق Play Games الرسمي لكي لا تحظره جوجل
+        res = gpsoauth.perform_oauth(
+            email, master_token, android_id,
+            service="oauth2:https://www.googleapis.com/auth/games",
+            app="com.google.android.play.games",
+            client_sig=GMS_SIG,
+            sdk_version=33
+        )
+        return res.get("Auth"), res.get("Error", "")
+    except Exception as e:
+        return None, str(e)
 
-def encode_varint(val):
-    out = bytearray()
-    while val > 0x7f:
-        out.append((val & 0x7f) | 0x80)
-        val >>= 7
-    out.append(val & 0x7f)
-    return bytes(out)
-
-def generate_cgki_ids(app_id_str):
-    try:
-        app_id = int(app_id_str or "307216063448")
-        results = []
-        for index in range(1, 15):
-            raw = b'\x08' + encode_varint(app_id) + b'\x10\x01\x18' + encode_varint(index)
-            b64 = base64.urlsafe_b64encode(raw).decode('utf-8').rstrip('=')
-            if b64.startswith(("CgkI", "CggI")):
-                results.append(b64)
-        return results
-    except Exception:
-        return ["CgkIxunC0YcJEAIQAQ", "CgkIxunC0YcJEAIQAg", "CgkIxunC0YcJEAIQAw", "CgkIxunC0YcJEAIQBA"]
-
-# 1. دالة استخراج التوكن باستخدام النطاق الرسمي عبر gpsoauth
-def request_play_games_v2_tokens(email, master_token, android_id, chest):
-    pkg = chest["package"]
-    sig = chest["client_sig"]
-    found_tokens = []
-    diag_logs = []
-
-    scopes_to_test = [
-        ("official_games", "oauth2:https://www.googleapis.com/auth/games"),
-        ("official_lite", "oauth2:https://www.googleapis.com/auth/games_lite")
-    ]
-
-    for label, sc in scopes_to_test:
-        try:
-            r1 = gpsoauth.perform_oauth(
-                email, master_token, android_id,
-                service=sc,
-                app=pkg,
-                client_sig=sig,
-                sdk_version=33
-            )
-            if r1.get("Auth"):
-                found_tokens.append(r1["Auth"])
-                diag_logs.append(f"{label}:OK!")
-            else:
-                diag_logs.append(f"{label}:{r1.get('Error', '?')[:12]}")
-        except Exception:
-            pass
-
-    return found_tokens, " | ".join(diag_logs)
-
-# 2. دالة جديدة: جلب وتصفية الإنجازات ديناميكياً (الطريقة الثالثة)
-def fetch_and_filter_achievements(access_token, chest):
-    headers = {
+# --- 2. جلب وفتح المهام (API Spoofing) ---
+def fetch_and_unlock_quests(access_token, chest):
+    game_headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
         "X-Android-Package": chest["package"],
         "X-Android-Cert": chest["client_sig"],
+        "User-Agent": "GooglePlayGames/2024 (Android 13)"
     }
-    url = "https://games.googleapis.com/games/v1/players/me/achievements?language=en_US"
     
+    # أ. جلب الإنجازات
+    url_fetch = "https://games.googleapis.com/games/v1/players/me/achievements?language=en_US"
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code != 200:
-            return None, f"Failed_Fetch:{response.status_code}"
+        res = requests.get(url_fetch, headers=game_headers, timeout=10)
+        if res.status_code != 200:
+            return False, f"Fetch_Failed_{res.status_code}"
             
-        items = response.json().get("items", [])
-        if not items:
-            return None, "No_Items"
-
-        matched_ids = []
-        for ach in items:
-            ach_name = ach.get("name", "").lower()
-            ach_desc = ach.get("description", "").lower()
-            
-            # مطابقة الكلمات المفتاحية
-            for keyword in chest.get("keywords", []):
-                if keyword.lower() in ach_name or keyword.lower() in ach_desc:
-                    matched_ids.append(ach["id"])
-                    break 
-                    
-        return matched_ids, "OK"
+        items = res.json().get("items", [])
     except Exception as e:
-        return None, str(e)[:20]
+        return False, f"Fetch_Error"
 
-# 3. دالة التلاعب بالـ API (API Spoofing) بدون وضع المحاكاة
-def execute_api_spoofing(tokens, chest, app_id, target_cgkis):
-    spec_toks = tokens.get("game_specific_tokens", [])
-    fp_tok = tokens.get("games_token")
-    unlocked_titles = []
-    diag_info = []
+    # ب. تصفية المهام
+    target_ids = []
+    for ach in items:
+        name = ach.get("name", "").lower()
+        desc = ach.get("description", "").lower()
+        for kw in chest["keywords"]:
+            if kw in name or kw in desc:
+                target_ids.append(ach["id"])
+                break
+                
+    if not target_ids:
+        return False, "No_Matching_Quests"
 
-    if spec_toks:
-        g_tok = spec_toks[0]
-        
-        # أ. محاولة جلب الإنجازات ديناميكياً (الطريقة الثالثة)
-        diag_info.append("Fetching Achievements...")
-        filtered_ids, fetch_status = fetch_and_filter_achievements(g_tok, chest)
-        
-        if filtered_ids:
-            target_cgkis = filtered_ids
-            diag_info.append(f"Found_{len(filtered_ids)}_tasks")
-        else:
-            diag_info.append(f"Fallback_to_Hardcoded")
-            # إذا فشل الجلب، نستخدم المعرفات الافتراضية الموجودة في الدالة
-            if not target_cgkis:
-                target_cgkis = generate_cgki_ids(app_id)
-
-        headers = {
-            "Authorization": f"Bearer {g_tok}",
-            "Content-Type": "application/json",
-            "X-Android-Package": chest["package"],
-            "X-Android-Cert": chest["client_sig"],
-            "User-Agent": "GooglePlayGames/2024 (Android 13; en_US)"
-        }
-
-        # ب. إرسال طلبات الفتح الحقيقية
-        for aid in target_cgkis:
-            url_unlock = f"https://games.googleapis.com/games/v1/achievements/{aid}/unlock"
-            try:
-                r = requests.post(url_unlock, headers=headers, json={}, timeout=5)
-                if r.status_code == 200:
-                    unlocked_titles.append(f"🎯 إنجاز {aid[-5:]} [200]")
-                else:
-                    diag_info.append(f"{r.status_code}:{r.text[:10]}")
-            except Exception:
-                pass
-
-    # ج. فتح إنجازات و XP تطبيق Play Games الحقيقي
-    if fp_tok:
-        h_fp = {
-            "Authorization": f"Bearer {fp_tok}",
-            "Content-Type": "application/json",
-            "X-Android-Package": "com.google.android.play.games",
-            "X-Android-Cert": GMS_SIG,
-            "User-Agent": "GooglePlayGames/2024 (Android 13; en_US)"
-        }
+    # ج. إرسال طلبات الفتح
+    unlocked = []
+    for aid in target_ids:
+        url_unlock = f"https://games.googleapis.com/games/v1/achievements/{aid}/unlock"
         try:
-            r_me = requests.get("https://games.googleapis.com/games/v1/players/me/achievements?language=en_US", headers=h_fp, timeout=8)
-            if r_me.status_code == 200:
-                for ach in r_me.json().get("items", [])[:5]:
-                    aid = ach.get("id")
-                    ru = requests.post(f"https://games.googleapis.com/games/v1/achievements/{aid}/unlock", headers=h_fp, json={}, timeout=5)
-                    if ru.status_code == 200:
-                        unlocked_titles.append(f"⭐ PG:{aid[-6:]} (+XP) [200]")
-        except Exception:
+            r = requests.post(url_unlock, headers=game_headers, json={}, timeout=5)
+            if r.status_code == 200:
+                unlocked.append(f"🎯 إنجاز {aid[-5:]} [تم الفتح]")
+        except:
             pass
+            
+    return len(unlocked) > 0, unlocked
 
-    # تم حذف وضع المحاكاة (Mocking) تماماً. إذا لم ينجح أي طلب، سيعرض البوت فشلاً.
-    return len(unlocked_titles) > 0, unlocked_titles, " | ".join(diag_info[:3])
-
-# 4. دالة التنفيذ الرئيسية
+# --- 3. التنفيذ الرئيسي ---
 def execute_sync_flow(chat_id, msg_id, uid):
     session = user_sessions.get(uid)
-    if not session:
-        return
-
     chest = CHESTS_DB[session["chest_key"]]
     email = session["email"]
     secret = session["password"]
-    masked_em = mask_email(email)
 
-    safe_edit(
-        f"🔄 <b>API Spoofing in Progress: {chest['name']}</b>\n\n"
-        f"👤 {masked_em}\n"
-        "① Extracting Master Token...\n"
-        "② Spoofing Device Headers (X-Android-Cert)...\n"
-        "③ Fetching & Unlocking Quests...",
-        chat_id, msg_id
-    )
+    safe_edit("🔄 <b>Step 1: Authenticating Google Account...</b>", chat_id, msg_id)
 
-    if secret.startswith("ya29."):
-        tokens = {
-            "games_token": secret.strip(),
-            "game_specific_tokens": [secret.strip()],
-            "auth_diag": "Direct_Token"
-        }
+    ok, res_data = worker_embedded_login(chat_id, msg_id, mask_email(email), email, secret)
+    if not ok:
+        safe_edit(f"❌ <b>Login Failed:</b> {res_data}", chat_id, msg_id, reply_markup=retry_inline_keyboard())
+        return
+    
+    access_token = res_data
+    safe_edit("🔄 <b>Step 2: Spoofing API & Unlocking Quests...</b>", chat_id, msg_id)
+
+    ok_ach, unlocked_names = fetch_and_unlock_quests(access_token, chest)
+    
+    if ok_ach:
+        unlocked_list_str = "\n".join([f"  • {name}" for name in unlocked_names])
+        done_text = (
+            "🎉 <b>Quest Execution Report</b>\n\n"
+            f"🎁 <b>Chest:</b> {chest['name']}\n"
+            f"📧 <b>Account:</b> {email}\n"
+            f"🔐 <b>X-Android-Cert:</b> <code>{chest['client_sig'][:16]}...</code>\n\n"
+            f"🏆 <b>Successfully Unlocked:</b>\n{unlocked_list_str}\n\n"
+            "👉 <i>Check Google Play Store -> Play Points!</i>"
+        )
     else:
-        ok, res_data = worker_embedded_login(chat_id, msg_id, chest, masked_em, email, secret)
-        if ok:
-            tokens = res_data
-        else:
-            # إيقاف المحاكاة: في حال فشل تسجيل الدخول، يظهر خطأ حقيقي
-            err_msg = (
-                "❌ <b>فشل تسجيل الدخول أو تم حظر الطلب.</b>\n\n"
-                f"🔑 <b>السبب:</b> {res_data}\n\n"
-                "💡 <b>نصيحة:</b> يمكنك استخدام توكن (ya29) مباشر بدلاً من الباسورد."
-            )
-            safe_edit(err_msg, chat_id, msg_id, reply_markup=retry_inline_keyboard())
-            user_sessions.pop(uid, None)
-            return
+        done_text = (
+            "⚠️ <b>Quest Execution Failed</b>\n\n"
+            f"📡 <b>Reason:</b> {unlocked_names}\n\n"
+            "💡 <i>Make sure your Google account has Play Games enabled and the game is installed.</i>"
+        )
 
-    active_app_id = chest.get("app_id", "307216063448")
-    target_cgkis = chest.get("task_ids") or generate_cgki_ids(active_app_id)
-
-    ok_ach, unlocked_names, diag_msg = execute_api_spoofing(tokens, chest, active_app_id, target_cgkis)
-    unlocked_list_str = "\n".join([f"  • {name}" for name in unlocked_names]) if unlocked_names else "  • ❌ لم يتم فتح أي إنجاز (فشل الطلب)"
-
-    done_text = (
-        "🎉 <b>Quest & API Spoofing Report</b>\n\n"
-        f"🎁 <b>Chest:</b> {chest['name']}\n"
-        f"📧 <b>Account:</b> {email}\n"
-        f"🆔 <b>Game Package:</b> <code>{chest['package']}</code>\n"
-        f"🔐 <b>X-Android-Cert:</b> <code>{chest['client_sig'][:16]}...</code>\n"
-        f"🔑 <b>Auth Status:</b> {tokens.get('auth_diag')}\n"
-        f"📡 <b>Spoofing Diag:</b> {diag_msg}\n\n"
-        f"🏆 <b>Unlocked Achievements ({len(unlocked_names)}):</b>\n{unlocked_list_str}\n\n"
-        "👉 <i>Check Google Play Store -> Play Points & Play Games XP now!</i>"
-    )
     safe_edit(done_text, chat_id, msg_id, reply_markup=retry_inline_keyboard())
     user_sessions.pop(uid, None)
 
-def worker_embedded_login(CHAT_ID, msg_id, chest, masked_em, email, password):
+# --- 4. تسجيل الدخول الآلي ---
+def worker_embedded_login(CHAT_ID, msg_id, masked_em, email, password):
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-blink-features=AutomationControlled",
-                    "--use-fake-ui-for-media-stream"
-                ]
-            )
+            browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-blink-features=AutomationControlled"])
             context = browser.new_context(
-                user_agent="Mozilla/5.0 (Linux; Android 13; Pixel 6 Build/TQ3A.230805.001; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/120.0.6099.144 Mobile Safari/537.36",
-                viewport={"width": 412, "height": 915},
-                locale="en-US"
+                user_agent="Mozilla/5.0 (Linux; Android 13; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/120.0.6099.144 Mobile Safari/537.36",
+                viewport={"width": 412, "height": 915}
             )
             page = context.new_page()
-
             page.goto("https://accounts.google.com/EmbeddedSetup", wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(2500)
 
-            email_loc = page.locator('input[type="email"], input#identifierId, input[name="identifier"]').first
-            email_loc.wait_for(state="visible", timeout=20000)
-            email_loc.fill(email)
-            page.wait_for_timeout(500)
-
-            next_btn = page.locator('#identifierNext, button:has-text("Next"), button:has-text("التالي")').first
-            if next_btn.is_visible():
-                next_btn.click()
-            else:
-                page.keyboard.press("Enter")
-
+            # إدخال الإيميل
+            page.locator('input[type="email"], input#identifierId').first.fill(email)
+            page.keyboard.press("Enter")
             page.wait_for_timeout(4000)
 
+            # إدخال الباسورد
             pwd_loc = page.locator('input[type="password"], input[name="Passwd"]').first
-            if not pwd_loc.is_visible():
+            if not pwd_loc.is_visible(): 
                 browser.close()
-                return False, "CAPTCHA_Or_Blocked"
-
+                return False, "CAPTCHA_Blocked"
+            
             pwd_loc.fill(password)
-            page.wait_for_timeout(500)
-
-            pwd_next = page.locator('#passwordNext, button:has-text("Next"), button:has-text("التالي")').first
-            if pwd_next.is_visible():
-                pwd_next.click()
-            else:
-                page.keyboard.press("Enter")
-
+            page.keyboard.press("Enter")
             page.wait_for_timeout(4500)
 
             body_text = page.inner_text("body")
-            if "Wrong password" in body_text or "كلمة المرور غير صحيحة" in body_text:
+            if "Wrong password" in body_text:
                 browser.close()
                 return False, "Wrong_Password"
 
-            try:
-                tap_yes_opt = page.locator('text=/Tap Yes on your phone|على هاتفك أو جهازك اللوحي/i').first
-                if tap_yes_opt.is_visible(timeout=2500):
-                    tap_yes_opt.click()
-                    page.wait_for_timeout(4500)
-                    body_text = page.inner_text("body")
-            except Exception:
-                pass
+            # إشعار الهاتف
+            match = re.search(r"\b(\d{2})\b", body_text)
+            tap_num = match.group(1) if match else "Yes"
+            safe_edit(f"📲 <b>إشعار جوجل وصل لهاتفك!</b>\n👉 اضغط على نعم والرقم: <b>{tap_num}</b>", CHAT_ID, msg_id)
+            bot.send_photo(CHAT_ID, page.screenshot(), caption=f"📲 اضغط {tap_num} في هاتفك الآن")
 
-            try:
-                match = re.search(r"\b(\d{2})\b", body_text)
-                tap_num = match.group(1) if match else "Yes"
-                prompt_msg = (
-                    f"🔄 <b>API Spoofing in Progress: {chest['name']}</b>\n\n"
-                    f"👤 {masked_em}\n"
-                    "📲 <b>إشعار جوجل وصل لهاتفك الآن!</b>\n"
-                    f"👉 <b>اضغط على نعم (Yes) ثم الرقم: {tap_num}</b>\n\n"
-                    "⏳ <i>جاري انتظار موافقتك من الهاتف (60 ثانية)...</i>"
-                )
-                safe_edit(prompt_msg, CHAT_ID, msg_id)
-                screenshot_bytes = page.screenshot()
-                bot.send_photo(CHAT_ID, screenshot_bytes, caption=f"📲 اضغط على نعم / الرقم ({tap_num}) في هاتفك الآن")
-            except Exception:
-                pass
-
+            # انتظار الموافقة
             oauth_token = None
             for _ in range(60):
-                try:
-                    tap_yes_retry = page.locator('text=/Tap Yes on your phone|على هاتفك أو جهازك اللوحي/i').first
-                    if tap_yes_retry.is_visible(timeout=500):
-                        tap_yes_retry.click()
-                        page.wait_for_timeout(3000)
-
-                    family_radio = page.locator('text=/I will be using this device|سأستخدم هذا الجهاز/i').first
-                    if family_radio.is_visible(timeout=500):
-                        family_radio.click(force=True)
-                        page.wait_for_timeout(300)
-
-                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    page.wait_for_timeout(400)
-
-                    action_btn = page.locator(
-                        'button:has-text("I agree"), button:has-text("أوافق"), '
-                        'button:has-text("Accept"), button:has-text("Next"), '
-                        'button:has-text("التالي"), button:has-text("Continue"), '
-                        'button:has-text("More"), #signinconsentNext'
-                    ).last
-
-                    if action_btn.is_visible(timeout=800):
-                        action_btn.scroll_into_view_if_needed()
-                        action_btn.click(force=True)
-                        page.wait_for_timeout(2000)
-                except Exception:
-                    pass
-
                 for cookie in context.cookies():
                     if cookie.get('name') == 'oauth_token':
                         oauth_token = cookie['value']
                         break
-
-                if oauth_token:
-                    break
-
+                if oauth_token: break
                 page.wait_for_timeout(1000)
 
             if not oauth_token:
                 browser.close()
-                return False, "Timeout"
+                return False, "Timeout_No_Approval"
 
-            tokens_bundle = {
-                "store_token": None,
-                "games_token": oauth_token,
-                "game_specific_tokens": [],
-                "auth_diag": "Init"
-            }
+            # استخراج Master Token
+            android_id = "396566cb13f27421"
+            master_res = gpsoauth.exchange_token(email, oauth_token, android_id, sdk_version=33)
+            master_token = master_res.get("Token")
 
-            try:
-                android_id = "396566cb13f27421"
-                master_res = gpsoauth.exchange_token(email, oauth_token, android_id, sdk_version=33)
-                master_token = master_res.get("Token")
+            if not master_token:
+                browser.close()
+                return False, "Master_Token_Failed"
 
-                if master_token:
-                    gm_res = gpsoauth.perform_oauth(
-                        email, master_token, android_id,
-                        service="oauth2:https://www.googleapis.com/auth/games https://www.googleapis.com/auth/games.firstparty",
-                        app="com.google.android.play.games",
-                        client_sig=GMS_SIG,
-                        sdk_version=33
-                    )
-                    if gm_res.get("Auth"):
-                        tokens_bundle["games_token"] = gm_res.get("Auth")
-
-                    v2_toks, v2_diag = request_play_games_v2_tokens(email, master_token, android_id, chest)
-                    tokens_bundle["game_specific_tokens"] = v2_toks
-                    tokens_bundle["auth_diag"] = v2_diag
-            except Exception as ex:
-                tokens_bundle["auth_diag"] = f"Ex:{str(ex)[:15]}"
-
+            # استخراج توكن الألعاب (الذي كان يسبب ServiceDisab)
+            access_token, err = request_play_games_token(email, master_token, android_id)
+            
             browser.close()
-            return True, tokens_bundle
+            
+            if not access_token:
+                return False, f"Game_Token_Error: {err}"
+                
+            return True, access_token
+
     except Exception as e:
         return False, str(e)[:80]
 
 if __name__ == "__main__":
-    print("Quest Helper API Spoofing Bot (Dynamic Fetch) Started!")
+    print("Bot is running...")
     bot.infinity_polling(skip_pending=True)
