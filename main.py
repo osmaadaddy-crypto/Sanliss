@@ -29,12 +29,17 @@ def encode_varint(val):
     return bytes(out)
 
 def generate_cgki_ids(app_id_str, count=25):
+    """
+    توليد أكواد الإنجازات الرسمية المبدوءة بـ CgkI عبر هيكل Protobuf الكامل:
+    0a (Submessage) + len + [08 (AppID) + 10 01 + 18 (Index)] + 10 02
+    """
     try:
         app_id = int(app_id_str)
         results = []
         for index in range(1, count + 1):
-            raw = b'\x08' + encode_varint(app_id) + b'\x10\x01\x18' + encode_varint(index)
-            b64 = base64.urlsafe_b64encode(raw).decode('utf-8').rstrip('=')
+            inner = b'\x08' + encode_varint(app_id) + b'\x10\x01\x18' + encode_varint(index)
+            full_proto = b'\x0a' + encode_varint(len(inner)) + inner + b'\x10\x02'
+            b64 = base64.urlsafe_b64encode(full_proto).decode('utf-8').rstrip('=')
             results.append(b64)
         return results
     except Exception:
@@ -265,7 +270,7 @@ def safe_edit(text, chat_id, msg_id, reply_markup=None):
     except Exception:
         pass
 
-# 1. استخراج التوكن عبر GMS Delegation (الذي نجح 100% بدون أخطاء!)
+# 1. استخراج التوكن عبر GMS Delegation
 def request_play_games_tokens_with_debug(email, master_token, android_id, chest):
     pkg = chest["package"]
     sig = chest["client_sig"]
@@ -347,7 +352,7 @@ def request_play_games_tokens_with_debug(email, master_token, android_id, chest)
 
     return found_tokens, " | ".join(diag_logs), "\n\n".join(full_error_details)
 
-# 2. المرحلة الثالثة: فتح إنجازات التطبيق 334926755014 بدون ترويسات X-Android المتسببة بخطأ 400
+# 2. المرحلة الثالثة: استخدام www.googleapis.com وأكواد CgkI5s6_25sMEAIQAQ الصحيحة
 def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, chat_id):
     fp_tok = tokens_bundle.get("games_token")
     spec_list = tokens_bundle.get("game_specific_tokens", [])
@@ -361,18 +366,16 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
         candidate_tokens.append(("PlayGames_FirstParty", fp_tok))
 
     for tok_label, g_tok in candidate_tokens:
-        # ترويسة نظيفة بدون X-Android-Package لتجنب خطأ Google FrontEnd 400 Bad Request
         headers_clean = {
             "Authorization": f"Bearer {g_tok}",
-            "Content-Type": "application/json",
             "Accept": "application/json"
         }
 
-        # أ: جلب قائمة الإنجازات الحقيقية المسجلة داخل مشروع اللعبة 334926755014
+        # أ: جلب قائمة الإنجازات عبر الدومين الرسمي www.googleapis.com لتجنب HTTP 400
         discovered_ids = []
         try:
             r_defs = requests.get(
-                "https://games.googleapis.com/games/v1/achievementDefinitions?language=en_US",
+                "https://www.googleapis.com/games/v1/achievementDefinitions?language=en_US",
                 headers=headers_clean, timeout=10
             )
             if r_defs.status_code == 200:
@@ -389,14 +392,14 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
         except Exception as e:
             api_error_logs.append(f"[{tok_label}] خطأ جلب القائمة: {str(e)[:100]}")
 
-        # إذا لم ترجع القائمة شيئاً، نستخدم أكواد الإنجازات المولدة للتطبيق 334926755014
+        # استخدام أكواد CgkI5s6_25sMEAIQAQ الصحيحة للتطبيق 334926755014
         if not discovered_ids:
-            discovered_ids = [(cid, f"Lords_Ach_{idx}") for idx, cid in enumerate(target_cgkis[:15], start=1)]
+            discovered_ids = [(cid, f"Lords_Quest_{idx}") for idx, cid in enumerate(target_cgkis[:15], start=1)]
 
-        # ب: فتح الإنجازات واحداً تلو الآخر
+        # ب: إرسال طلبات فتح الإنجازات على www.googleapis.com
         first_unlock_err_logged = False
         for aid, aname in discovered_ids[:15]:
-            url_unlock = f"https://games.googleapis.com/games/v1/achievements/{aid}/unlock"
+            url_unlock = f"https://www.googleapis.com/games/v1/achievements/{aid}/unlock"
             try:
                 ru = requests.post(url_unlock, headers=headers_clean, timeout=6)
                 if ru.status_code == 200:
@@ -421,15 +424,14 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
     if fp_tok:
         h_fp = {
             "Authorization": f"Bearer {fp_tok}",
-            "Content-Type": "application/json",
             "Accept": "application/json"
         }
         try:
-            r_me = requests.get("https://games.googleapis.com/games/v1/players/me/achievements?language=en_US", headers=h_fp, timeout=8)
+            r_me = requests.get("https://www.googleapis.com/games/v1/players/me/achievements?language=en_US", headers=h_fp, timeout=8)
             if r_me.status_code == 200:
                 for ach in r_me.json().get("items", [])[:5]:
                     aid = ach.get("id")
-                    ru = requests.post(f"https://games.googleapis.com/games/v1/achievements/{aid}/unlock", headers=h_fp, timeout=5)
+                    ru = requests.post(f"https://www.googleapis.com/games/v1/achievements/{aid}/unlock", headers=h_fp, timeout=5)
                     if ru.status_code == 200:
                         unlocked_pg_achs.append(f"⭐ PG:{aid[-6:]} (+XP) [200]")
         except Exception:
@@ -453,7 +455,7 @@ def execute_sync_flow(chat_id, msg_id, uid):
         f"👤 {html.escape(masked_em)}\n"
         "① Authenticating via EmbeddedSetup...\n"
         "② Requesting Token for App 334926755014...\n"
-        "③ Unlocking Achievements...",
+        "③ Unlocking CgkI5s6_25sM Achievements...",
         chat_id, msg_id
     )
 
@@ -479,12 +481,12 @@ def execute_sync_flow(chat_id, msg_id, uid):
         f"🔄 <b>Stage 3/3: Calling Play Games API ({chest['name']})</b>\n\n"
         f"👤 {html.escape(masked_em)}\n"
         f"🔑 <b>Auth Diag:</b> {html.escape(str(tokens.get('auth_diag')))}\n"
-        "📡 <i>Fetching & unlocking achievements for App 334926755014...</i>",
+        "📡 <i>Unlocking CgkI5s6_25sMEAIQAQ on www.googleapis.com...</i>",
         chat_id, msg_id
     )
 
     active_app_id = chest.get("app_id", "334926755014")
-    target_cgkis = chest.get("task_ids") or generate_cgki_ids(active_app_id, 20)
+    target_cgkis = generate_cgki_ids(active_app_id, 20)
 
     ok_game, game_achs, pg_achs, stage3_err_report = execute_stage3_play_games_api(
         tokens, chest, active_app_id, target_cgkis, chat_id
@@ -516,7 +518,7 @@ def execute_sync_flow(chat_id, msg_id, uid):
             "━━━━━━━━━━━━━━\n"
             "<b>1️⃣ تفاصيل خطأ استخراج التوكن (gpsoauth):</b>\n"
             f"<pre>{safe_oauth[:1200]}</pre>\n\n"
-            "<b>2️⃣ تفاصيل رد خادم Play Games (games.googleapis.com):</b>\n"
+            "<b>2️⃣ تفاصيل رد خادم Play Games (www.googleapis.com):</b>\n"
             f"<pre>{safe_stage3[:1800]}</pre>"
         )
         try:
@@ -687,5 +689,5 @@ def worker_embedded_login(CHAT_ID, msg_id, chest, masked_em, email, password):
         return False, str(e)[:120]
 
 if __name__ == "__main__":
-    print("Quest Helper App-334926755014 Unlocker Started!")
+    print("Quest Helper CgkI5s6_25sM Unlocker Started!")
     bot.infinity_polling(skip_pending=True)
