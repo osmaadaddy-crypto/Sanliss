@@ -29,14 +29,9 @@ def encode_varint(val):
     return bytes(out)
 
 def build_real_cgki_list(app_id_int, count=10):
-    """
-    بناء معرف إنجاز مطابق لهيكل Google Play Games القياسي (يبدأ دائماً بـ CgkI):
-    Field 1 (0x0A) -> Length (0x09) -> Varint(app_id) + Field 2 (0x10 0x01) + Field 3 (0x18 + index)
-    """
     res = []
     app_bytes = encode_varint(int(app_id_int))
     for idx in range(1, count + 1):
-        # الصيغة القياسية المطابقة تماماً لـ CgkIsunb0aQREAIQAg
         payload = b'\x0a' + encode_varint(len(app_bytes) + 4) + app_bytes + b'\x10\x01\x18' + encode_varint(idx)
         b64 = base64.urlsafe_b64encode(payload).decode('utf-8').rstrip('=')
         res.append(b64)
@@ -345,8 +340,6 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
 
     for tok_label, raw_tok in spec_list:
         g_tok = str(raw_tok).strip()
-
-        # حل خطأ HTTP 400 في GET: تمرير التوكن كمعامل access_token أيضاً لتجنب رفض ترويسة GFE
         headers_clean = {
             "Authorization": f"Bearer {g_tok}",
             "Accept": "application/json"
@@ -374,11 +367,10 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
         except Exception as e:
             api_error_logs.append(f"[{tok_label}] GET Exception: {str(e)[:80]}")
 
-        # إذا لم ترجع القائمة معرفات خاصة باللعبة، نختبر أكواد CgkI المولدة بالهيكل القياسي
         if not discovered_ids:
             discovered_ids = [(cid, f"Lords_Ach_{idx}") for idx, cid in enumerate(target_cgkis, start=1)]
 
-        logged_ statuses = set()
+        logged_statuses = set()
         for aid, aname in discovered_ids:
             url_unlock = f"https://games.googleapis.com/games/v1/achievements/{aid}/unlock"
             try:
@@ -400,13 +392,12 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
                         api_error_logs.append(
                             f"[{tok_label}] POST achievements/{aid}/unlock -> HTTP {ru.status_code}:\n{ru.text[:260]}"
                         )
-            except Exception as e:
+            except Exception:
                 pass
 
         if unlocked_game_achs:
             break
 
-    # فتح إنجازات تطبيق Play Games العامة (+XP)
     if fp_tok:
         clean_fp = str(fp_tok).strip()
         h_fp = {
