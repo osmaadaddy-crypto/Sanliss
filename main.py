@@ -3,7 +3,6 @@ import re
 import html
 import json
 import time
-import base64
 import threading
 import requests
 import gpsoauth
@@ -20,39 +19,21 @@ bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 GMS_SIG = "38918a453d07199354f8b19af05ec6562ced5788"
 LORDS_SIG_SHA1 = "75adf545f77fee9de110d4ddfae60bb3b9b17dad"
 
-def encode_varint(val):
-    out = bytearray()
-    while val > 0x7f:
-        out.append((val & 0x7f) | 0x80)
-        val >>= 7
-    out.append(val & 0x7f)
-    return bytes(out)
-
-def generate_cgki_ids(app_id_str, count=25):
-    """
-    توليد أكواد الإنجازات الرسمية المبدوءة بـ CgkI عبر هيكل Protobuf الكامل:
-    0a (Submessage) + len + [08 (AppID) + 10 01 + 18 (Index)] + 10 02
-    """
-    try:
-        app_id = int(app_id_str)
-        results = []
-        for index in range(1, count + 1):
-            inner = b'\x08' + encode_varint(app_id) + b'\x10\x01\x18' + encode_varint(index)
-            full_proto = b'\x0a' + encode_varint(len(inner)) + inner + b'\x10\x02'
-            b64 = base64.urlsafe_b64encode(full_proto).decode('utf-8').rstrip('=')
-            results.append(b64)
-        return results
-    except Exception:
-        return []
-
 CHESTS_DB = {
     "lords_mobile": {
         "name": "Lords Mobile: Kingdom Wars (50)",
         "package": "com.igg.android.lordsmobile",
-        "app_id": "334926755014",
+        "app_id": "307216063448",
         "version_code": 710,
         "client_sig": LORDS_SIG_SHA1,
-        "task_ids": generate_cgki_ids("334926755014", 20)
+        "task_ids": [
+            "CgkIxunC0YcJEAIQAQ",
+            "CgkIxunC0YcJEAIQAg",
+            "CgkIxunC0YcJEAIQAw",
+            "CgkIxunC0YcJEAIQBA",
+            "CgkIxunC0YcJEAIQBQ",
+            "CgkIxunC0YcJEAIQBg"
+        ]
     },
     "whiteout_survival": {
         "name": "Whiteout Survival (50)",
@@ -270,7 +251,7 @@ def safe_edit(text, chat_id, msg_id, reply_markup=None):
     except Exception:
         pass
 
-# 1. استخراج التوكن عبر GMS Delegation
+# حل المشكلة 2 و 4: استخدام النطاق الرسمي فقط (https://www.googleapis.com/auth/games)
 def request_play_games_tokens_with_debug(email, master_token, android_id, chest):
     pkg = chest["package"]
     sig = chest["client_sig"]
@@ -278,8 +259,9 @@ def request_play_games_tokens_with_debug(email, master_token, android_id, chest)
     diag_logs = []
     full_error_details = []
 
-    gms_Configs = [
-        ("GMS_Delegated_Games", {
+    configs = [
+        # 1. طلب توكن اللعبة بالنطاق الرسمي فقط مع تفويض GMS لتجنب ServiceDisabled
+        ("Official_Games_Scope", {
             "accountType": "HOSTED_OR_GOOGLE",
             "Email": email,
             "has_permission": 1,
@@ -297,30 +279,13 @@ def request_play_games_tokens_with_debug(email, master_token, android_id, chest)
             "operatorCountry": "us",
             "lang": "en"
         }),
-        ("GMS_Delegated_Lite", {
+        # 2. طلب PlayGames_App بالنطاق الرسمي فقط بدون firstparty (كما في المشكلة 4)
+        ("PlayGames_App_Official", {
             "accountType": "HOSTED_OR_GOOGLE",
             "Email": email,
             "has_permission": 1,
             "EncryptedPasswd": master_token,
-            "service": "oauth2:https://www.googleapis.com/auth/games_lite",
-            "source": "android",
-            "androidId": android_id,
-            "app": pkg,
-            "client_sig": sig,
-            "callerPkg": "com.google.android.gms",
-            "callerSig": GMS_SIG,
-            "google_play_services_version": 240812000,
-            "sdk_version": 33,
-            "device_country": "us",
-            "operatorCountry": "us",
-            "lang": "en"
-        }),
-        ("PlayGames_App", {
-            "accountType": "HOSTED_OR_GOOGLE",
-            "Email": email,
-            "has_permission": 1,
-            "EncryptedPasswd": master_token,
-            "service": "oauth2:https://www.googleapis.com/auth/games https://www.googleapis.com/auth/games.firstparty",
+            "service": "oauth2:https://www.googleapis.com/auth/games",
             "source": "android",
             "androidId": android_id,
             "app": "com.google.android.play.games",
@@ -335,7 +300,7 @@ def request_play_games_tokens_with_debug(email, master_token, android_id, chest)
         })
     ]
 
-    for label, payload in gms_Configs:
+    for label, payload in configs:
         try:
             r = gpsoauth._perform_auth_request(payload, proxies=None)
             if r.get("Auth"):
@@ -352,7 +317,7 @@ def request_play_games_tokens_with_debug(email, master_token, android_id, chest)
 
     return found_tokens, " | ".join(diag_logs), "\n\n".join(full_error_details)
 
-# 2. المرحلة الثالثة: استخدام www.googleapis.com وأكواد CgkI5s6_25sMEAIQAQ الصحيحة
+# حل المشكلة 1 و 3: إضافة ترويسات X-Android-Package و X-Android-Cert والاعتماد على achievementDefinitions
 def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, chat_id):
     fp_tok = tokens_bundle.get("games_token")
     spec_list = tokens_bundle.get("game_specific_tokens", [])
@@ -361,21 +326,21 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
     unlocked_pg_achs = []
     api_error_logs = []
 
-    candidate_tokens = [item for item in spec_list if "PlayGames_App" not in item[0]]
-    if not candidate_tokens and fp_tok:
-        candidate_tokens.append(("PlayGames_FirstParty", fp_tok))
-
-    for tok_label, g_tok in candidate_tokens:
+    for tok_label, g_tok in spec_list:
+        # حل المشكلة الأولى: تمرير الترويسات الكاملة كما في الصور المرفقة بالضبط
         headers_clean = {
             "Authorization": f"Bearer {g_tok}",
-            "Accept": "application/json"
+            "Accept": "application/json",
+            "X-Android-Package": chest["package"],
+            "X-Android-Cert": chest["client_sig"],
+            "User-Agent": "GooglePlayGames/2024 (Android 13; en_US)"
         }
 
-        # أ: جلب قائمة الإنجازات عبر الدومين الرسمي www.googleapis.com لتجنب HTTP 400
+        # حل المشكلة الثالثة: جلب المعرفات الصحيحة عبر achievementDefinitions أولاً بدون تخمين عشوائي
         discovered_ids = []
         try:
             r_defs = requests.get(
-                "https://www.googleapis.com/games/v1/achievementDefinitions?language=en_US",
+                "https://games.googleapis.com/games/v1/achievementDefinitions?language=en_US",
                 headers=headers_clean, timeout=10
             )
             if r_defs.status_code == 200:
@@ -392,14 +357,14 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
         except Exception as e:
             api_error_logs.append(f"[{tok_label}] خطأ جلب القائمة: {str(e)[:100]}")
 
-        # استخدام أكواد CgkI5s6_25sMEAIQAQ الصحيحة للتطبيق 334926755014
+        # إذا لم ترجع القائمة شيئاً، نستخدم المعرفات الثابتة المستخرجة من ملف اللعبة الأصلي (وليس التخمين العشوائي)
         if not discovered_ids:
-            discovered_ids = [(cid, f"Lords_Quest_{idx}") for idx, cid in enumerate(target_cgkis[:15], start=1)]
+            discovered_ids = [(cid, f"Lords_Quest_{idx}") for idx, cid in enumerate(target_cgkis, start=1)]
 
-        # ب: إرسال طلبات فتح الإنجازات على www.googleapis.com
+        # إرسال طلبات فتح الإنجازات باستخدام الترويسات الكاملة headers_clean
         first_unlock_err_logged = False
-        for aid, aname in discovered_ids[:15]:
-            url_unlock = f"https://www.googleapis.com/games/v1/achievements/{aid}/unlock"
+        for aid, aname in discovered_ids[:10]:
+            url_unlock = f"https://games.googleapis.com/games/v1/achievements/{aid}/unlock"
             try:
                 ru = requests.post(url_unlock, headers=headers_clean, timeout=6)
                 if ru.status_code == 200:
@@ -420,18 +385,19 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
         if unlocked_game_achs:
             break
 
-    # 3. فتح إنجازات تطبيق Play Games العامة (+XP)
+    # فتح إنجازات تطبيق Play Games العامة (+XP)
     if fp_tok:
         h_fp = {
             "Authorization": f"Bearer {fp_tok}",
-            "Accept": "application/json"
+            "Accept": "application/json",
+            "User-Agent": "GooglePlayGames/2024 (Android 13; en_US)"
         }
         try:
-            r_me = requests.get("https://www.googleapis.com/games/v1/players/me/achievements?language=en_US", headers=h_fp, timeout=8)
+            r_me = requests.get("https://games.googleapis.com/games/v1/players/me/achievements?language=en_US", headers=h_fp, timeout=8)
             if r_me.status_code == 200:
                 for ach in r_me.json().get("items", [])[:5]:
                     aid = ach.get("id")
-                    ru = requests.post(f"https://www.googleapis.com/games/v1/achievements/{aid}/unlock", headers=h_fp, timeout=5)
+                    ru = requests.post(f"https://games.googleapis.com/games/v1/achievements/{aid}/unlock", headers=h_fp, timeout=5)
                     if ru.status_code == 200:
                         unlocked_pg_achs.append(f"⭐ PG:{aid[-6:]} (+XP) [200]")
         except Exception:
@@ -454,8 +420,8 @@ def execute_sync_flow(chat_id, msg_id, uid):
         f"🔄 <b>Stage 1/3: Logging into Google ({chest['name']})</b>\n\n"
         f"👤 {html.escape(masked_em)}\n"
         "① Authenticating via EmbeddedSetup...\n"
-        "② Requesting Token for App 334926755014...\n"
-        "③ Unlocking CgkI5s6_25sM Achievements...",
+        "② Requesting Official Games Scope Token...\n"
+        "③ Unlocking Achievements with Spoofed Headers...",
         chat_id, msg_id
     )
 
@@ -481,12 +447,12 @@ def execute_sync_flow(chat_id, msg_id, uid):
         f"🔄 <b>Stage 3/3: Calling Play Games API ({chest['name']})</b>\n\n"
         f"👤 {html.escape(masked_em)}\n"
         f"🔑 <b>Auth Diag:</b> {html.escape(str(tokens.get('auth_diag')))}\n"
-        "📡 <i>Unlocking CgkI5s6_25sMEAIQAQ on www.googleapis.com...</i>",
+        "📡 <i>Sending spoofed headers (X-Android-Package & X-Android-Cert)...</i>",
         chat_id, msg_id
     )
 
-    active_app_id = chest.get("app_id", "334926755014")
-    target_cgkis = generate_cgki_ids(active_app_id, 20)
+    active_app_id = chest.get("app_id", "307216063448")
+    target_cgkis = chest.get("task_ids", [])
 
     ok_game, game_achs, pg_achs, stage3_err_report = execute_stage3_play_games_api(
         tokens, chest, active_app_id, target_cgkis, chat_id
@@ -518,7 +484,7 @@ def execute_sync_flow(chat_id, msg_id, uid):
             "━━━━━━━━━━━━━━\n"
             "<b>1️⃣ تفاصيل خطأ استخراج التوكن (gpsoauth):</b>\n"
             f"<pre>{safe_oauth[:1200]}</pre>\n\n"
-            "<b>2️⃣ تفاصيل رد خادم Play Games (www.googleapis.com):</b>\n"
+            "<b>2️⃣ تفاصيل رد خادم Play Games:</b>\n"
             f"<pre>{safe_stage3[:1800]}</pre>"
         )
         try:
@@ -667,13 +633,22 @@ def worker_embedded_login(CHAT_ID, msg_id, chest, masked_em, email, password):
                 master_token = master_res.get("Token")
 
                 if master_token:
+                    # جلب توكن XP لتطبيق Play Games بشكل منفصل لضمان استمرار عمل إنجازات الـ XP الخمسة
+                    gm_xp = gpsoauth.perform_oauth(
+                        email, master_token, android_id,
+                        service="oauth2:https://www.googleapis.com/auth/games https://www.googleapis.com/auth/games.firstparty",
+                        app="com.google.android.play.games",
+                        client_sig=GMS_SIG,
+                        sdk_version=33
+                    )
+                    if gm_xp.get("Auth"):
+                        tokens_bundle["games_token"] = gm_xp.get("Auth")
+
+                    # تنفيذ استخراج التوكن بالطريقة المطلوبة في الصور
                     v2_toks, v2_diag, full_errs = request_play_games_tokens_with_debug(
                         email, master_token, android_id, chest
                     )
                     tokens_bundle["game_specific_tokens"] = v2_toks
-                    for lbl, tk in v2_toks:
-                        if lbl == "PlayGames_App":
-                            tokens_bundle["games_token"] = tk
                     tokens_bundle["auth_diag"] = v2_diag
                     tokens_bundle["oauth_err_details"] = full_errs
                 else:
@@ -689,5 +664,5 @@ def worker_embedded_login(CHAT_ID, msg_id, chest, masked_em, email, password):
         return False, str(e)[:120]
 
 if __name__ == "__main__":
-    print("Quest Helper CgkI5s6_25sM Unlocker Started!")
+    print("Quest Helper Updated with 4 Fixes Started!")
     bot.infinity_polling(skip_pending=True)
