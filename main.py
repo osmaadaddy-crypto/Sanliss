@@ -56,6 +56,20 @@ CHESTS_DB = {
             build_real_cgki_list(334926755014, 4)
         )
     },
+    "gossip_harbor": {
+        "name": "Gossip Harbor: Merge & Story (50)",
+        "package": "com.mergegames.gossipharbor",
+        "app_id": None,
+        "version_code": 1,
+        "client_sig": GOSSIP_HARBOR_SIG_SHA1,
+        "task_ids": [],
+        "target_names": [
+            "Brimwave Beginnings",
+            "Welcome to Brimwave",
+            "Starter Snack Bar",
+            "Leveled Up"
+        ]
+    },
     "whiteout_survival": {
         "name": "Whiteout Survival (50)",
         "package": "com.gof.global",
@@ -91,20 +105,6 @@ CHESTS_DB = {
         "client_sig": GMS_SIG,
         "exact_limit": None,
         "task_ids": []
-    },
-    "gossip_harbor": {
-        "name": "Gossip Harbor: Merge & Story (50)",
-        "package": "com.mergegames.gossipharbor",
-        "app_id": None,
-        "version_code": 1,
-        "client_sig": GOSSIP_HARBOR_SIG_SHA1,
-        "task_ids": [],
-        "target_names": [
-            "Brimwave Beginnings",
-            "Welcome to Brimwave",
-            "Starter Snack Bar",
-            "Leveled Up"
-        ]
     }
 }
 
@@ -392,6 +392,8 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
                 except Exception:
                     data_j = {}
                 items = data_j.get("items", [])
+                if items:
+                    api_error_logs.append(f"[{tok_label}] Sample item: {json.dumps(items[0])[:180]}")
                 for it in items:
                     aid = it.get("id", "")
                     aname = it.get("name", aid)
