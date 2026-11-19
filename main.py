@@ -9,18 +9,14 @@ import threading
 import requests
 import gpsoauth
 import telebot
-from telebot import apihelper
 from telebot.types import (
     ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton
 )
 from playwright.sync_api import sync_playwright
 
-apihelper.READ_TIMEOUT = 25
-apihelper.CONNECT_TIMEOUT = 15
-
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML", threaded=True)
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
 GMS_SIG = "38918a453d07199354f8b19af05ec6562ced5788"
 LORDS_SIG_SHA1 = "75adf545f77fee9de110d4ddfae60bb3b9b17dad"
@@ -61,19 +57,13 @@ CHESTS_DB = {
         )
     },
     "gossip_harbor": {
-        "name": "Gossip Harbor: Merge & Story (50)",
+        "name": "Gossip Harbor: Merge & Story",
         "package": "com.mergegames.gossipharbor",
         "app_id": None,
         "version_code": 1,
         "client_sig": GOSSIP_HARBOR_SIG_SHA1,
-        "exact_limit": 4,
-        "task_ids": [],
-        "target_names": [
-            "Welcome to Brimwave",
-            "Brimwave Beginnings",
-            "Starter Snack Bar",
-            "Leveled Up"
-        ]
+        "exact_limit": 16,
+        "task_ids": []
     },
     "whiteout_survival": {
         "name": "Whiteout Survival (50)",
@@ -366,9 +356,6 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
     fp_tok = tokens_bundle.get("games_token")
     spec_list = tokens_bundle.get("game_specific_tokens", [])
     exact_limit = chest.get("exact_limit")
-    target_names = chest.get("target_names") or []
-    target_names_lower = [n.strip().lower() for n in target_names if n and n.strip()]
-    target_names_set = set(target_names_lower)
 
     unlocked_game_achs = []
     unlocked_pg_achs = []
@@ -384,30 +371,6 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
             "Accept": "application/json",
             "Content-Type": "application/json"
         }
-        headers_post = {
-            "Authorization": f"Bearer {g_tok}",
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "X-Android-Package": chest["package"],
-            "X-Android-Cert": chest["client_sig"].upper()
-        }
-
-        name_by_id = {}
-        if target_names_set:
-            try:
-                r_defs_meta = http_sess.get(
-                    "https://www.googleapis.com/games/v1/achievements?language=en_US",
-                    headers=headers_clean,
-                    timeout=5
-                )
-                if r_defs_meta.status_code == 200:
-                    for d_it in r_defs_meta.json().get("items", []):
-                        d_id = d_it.get("id", "")
-                        d_name = d_it.get("name", "")
-                        if d_id and d_name:
-                            name_by_id[d_id] = d_name
-            except Exception:
-                pass
 
         discovered_ids = []
         try:
@@ -422,31 +385,10 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
                 except Exception:
                     data_j = {}
                 items = data_j.get("items", [])
-                matched_by_name = {}
-                unlabeled_items = []
                 for it in items:
                     aid = it.get("id", "")
-                    state = it.get("achievementState", "")
-                    if not aid or state == "UNLOCKED":
-                        continue
-                    resolved_name = it.get("name") or name_by_id.get(aid) or ""
-                    if target_names_set:
-                        norm = resolved_name.strip().lower()
-                        if norm in target_names_set and norm not in matched_by_name:
-                            matched_by_name[norm] = (aid, resolved_name)
-                        elif not resolved_name:
-                            unlabeled_items.append((aid, aid))
-                    else:
-                        discovered_ids.append((aid, resolved_name or aid))
-
-                if target_names_set:
-                    for ordered_name in target_names:
-                        norm = ordered_name.strip().lower()
-                        if norm in matched_by_name:
-                            discovered_ids.append(matched_by_name[norm])
-                    if not discovered_ids and unlabeled_items:
-                        discovered_ids = unlabeled_items[:exact_limit if exact_limit is not None else len(target_names_set)]
-
+                    if aid and not aid.startswith("CgkIsunb0aQR"):
+                        discovered_ids.append((aid, it.get("name", aid)))
                 api_error_logs.append(f"[{tok_label}] GET players/me/achievements -> 200 OK (Total: {len(items)}, Game: {len(discovered_ids)})")
             else:
                 api_error_logs.append(
@@ -455,11 +397,10 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
         except Exception as e:
             api_error_logs.append(f"[{tok_label}] GET Exception: {str(e)[:80]}")
 
-        if not discovered_ids and not target_names_set:
+        if not discovered_ids:
             discovered_ids = [(cid, f"Lords_Ach_{idx}") for idx, cid in enumerate(target_cgkis[:8], start=1)]
 
-        max_items = exact_limit if exact_limit is not None else (len(target_names_set) if target_names_set else 8)
-        candidates = discovered_ids[:max_items]
+        candidates = discovered_ids[:exact_limit] if exact_limit is not None else discovered_ids[:8]
 
         logged_statuses = set()
         for aid, aname in candidates:
@@ -467,7 +408,7 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
                 break
             url_unlock = f"https://www.googleapis.com/games/v1/achievements/{aid}/unlock"
             try:
-                ru = http_sess.post(url_unlock, headers=headers_post, json={}, timeout=4)
+                ru = http_sess.post(url_unlock, headers=headers_clean, json={}, timeout=4)
                 if ru.status_code == 200:
                     try:
                         resp_j = ru.json()
@@ -788,10 +729,4 @@ def worker_embedded_login(CHAT_ID, msg_id, chest, masked_em, email, password):
 
 if __name__ == "__main__":
     print("Quest Helper Crash-Proof Stage 3 Started!")
-    bot.remove_webhook()
-    while True:
-        try:
-            bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=15)
-        except Exception as poll_err:
-            print("Polling error:", poll_err)
-            time.sleep(3)
+    bot.infinity_polling(skip_pending=True)
