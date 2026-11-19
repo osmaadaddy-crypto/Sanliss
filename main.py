@@ -22,13 +22,6 @@ GMS_SIG = "38918a453d07199354f8b19af05ec6562ced5788"
 LORDS_SIG_SHA1 = "75adf545f77fee9de110d4ddfae60bb3b9b17dad"
 GOSSIP_HARBOR_SIG_SHA1 = "58e71785c961e7328ea9c76de647f8f6c4403b39"
 
-GOSSIP_HARBOR_EXACT_ACHIEVEMENTS = [
-    "Brimwave Beginnings",
-    "Welcome to Brimwave",
-    "Starter Snack Bar",
-    "Leveled Up"
-]
-
 def encode_varint(val):
     out = bytearray()
     while val > 0x7f:
@@ -41,6 +34,7 @@ def build_real_cgki_list(app_id_int, count=6):
     res = []
     app_bytes = encode_varint(int(app_id_int))
     for idx in range(1, count + 1):
+        # الصيغة القياسية لمعرفات CgkI في Google Play Games
         inner = b'\x08' + app_bytes + b'\x10\x01\x18' + encode_varint(idx)
         payload = b'\x0a' + encode_varint(len(inner)) + inner
         b64 = base64.urlsafe_b64encode(payload).decode('utf-8').rstrip('=')
@@ -48,15 +42,6 @@ def build_real_cgki_list(app_id_int, count=6):
     return res
 
 CHESTS_DB = {
-    "gossip_harbor": {
-        "name": "Gossip Harbor®: Merge & Story",
-        "package": "com.microfun.gossipharbor",
-        "app_id": None,
-        "version_code": 1,
-        "client_sig": GOSSIP_HARBOR_SIG_SHA1,
-        "exact_achievements": GOSSIP_HARBOR_EXACT_ACHIEVEMENTS,
-        "task_ids": build_real_cgki_list(307216063448, 4)
-    },
     "lords_mobile": {
         "name": "Lords Mobile: Kingdom Wars (50)",
         "package": "com.igg.android.lordsmobile",
@@ -64,12 +49,21 @@ CHESTS_DB = {
         "delegated_app_id": "334926755014",
         "version_code": 710,
         "client_sig": LORDS_SIG_SHA1,
-        "exact_achievements": None,
+        "exact_limit": None,
         "task_ids": (
             ["CgkIxunC0YcJEAIQAQ", "CgkIxunC0YcJEAIQAg", "CgkIxunC0YcJEAIQAw", "CgkIxunC0YcJEAIQBA"] +
             build_real_cgki_list(307216063448, 4) +
             build_real_cgki_list(334926755014, 4)
         )
+    },
+    "gossip_harbor": {
+        "name": "Gossip Harbor: Merge & Story",
+        "package": "com.mergegames.gossipharbor",
+        "app_id": None,
+        "version_code": 1,
+        "client_sig": GOSSIP_HARBOR_SIG_SHA1,
+        "exact_limit": 4,
+        "task_ids": []
     },
     "whiteout_survival": {
         "name": "Whiteout Survival (50)",
@@ -77,7 +71,7 @@ CHESTS_DB = {
         "app_id": "307216063448",
         "version_code": 1,
         "client_sig": GMS_SIG,
-        "exact_achievements": None,
+        "exact_limit": None,
         "task_ids": []
     },
     "pokemon_tcg": {
@@ -86,7 +80,7 @@ CHESTS_DB = {
         "app_id": None,
         "version_code": 1,
         "client_sig": GMS_SIG,
-        "exact_achievements": None,
+        "exact_limit": None,
         "task_ids": []
     },
     "angry_birds_2": {
@@ -95,7 +89,7 @@ CHESTS_DB = {
         "app_id": None,
         "version_code": 1,
         "client_sig": GMS_SIG,
-        "exact_achievements": None,
+        "exact_limit": None,
         "task_ids": []
     },
     "8ball_pool": {
@@ -104,7 +98,7 @@ CHESTS_DB = {
         "app_id": None,
         "version_code": 1,
         "client_sig": GMS_SIG,
-        "exact_achievements": None,
+        "exact_limit": None,
         "task_ids": []
     }
 }
@@ -209,7 +203,7 @@ def handle_callbacks(call):
 
     if data == "edit_creds":
         if uid not in user_sessions:
-            user_sessions[uid] = {"chest_key": "gossip_harbor", "step": "wait_email"}
+            user_sessions[uid] = {"chest_key": "lords_mobile", "step": "wait_email"}
         else:
             user_sessions[uid]["step"] = "wait_email"
         safe_edit(
@@ -361,7 +355,7 @@ def request_play_games_tokens_with_debug(email, master_token, android_id, chest)
 def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, chat_id):
     fp_tok = tokens_bundle.get("games_token")
     spec_list = tokens_bundle.get("game_specific_tokens", [])
-    exact_names = chest.get("exact_achievements")
+    exact_limit = chest.get("exact_limit")
 
     unlocked_game_achs = []
     unlocked_pg_achs = []
@@ -371,6 +365,7 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
 
     for tok_label, raw_tok in spec_list:
         g_tok = str(raw_tok).strip()
+        # استخدام ترويسة قياسية نظيفة بدون تكرار access_token في الرابط لمنع تعليق الخادم
         headers_clean = {
             "Authorization": f"Bearer {g_tok}",
             "Accept": "application/json",
@@ -390,26 +385,11 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
                 except Exception:
                     data_j = {}
                 items = data_j.get("items", [])
-
-                if exact_names:
-                    allowed_lower = {n.strip().lower(): n.strip() for n in exact_names}
-                    matched_by_name = {}
-                    for it in items:
-                        aid = str(it.get("id", "")).strip()
-                        aname = str(it.get("name", "")).strip()
-                        key_l = aname.lower()
-                        if aid and key_l in allowed_lower and key_l not in matched_by_name:
-                            matched_by_name[key_l] = (aid, allowed_lower[key_l])
-                    for req_name in exact_names:
-                        if req_name.lower() in matched_by_name:
-                            discovered_ids.append(matched_by_name[req_name.lower()])
-                    api_error_logs.append(f"[{tok_label}] Exact filter matched {len(discovered_ids)}/{len(exact_names)}")
-                else:
-                    for it in items:
-                        aid = it.get("id", "")
-                        if aid and not aid.startswith("CgkIsunb0aQR"):
-                            discovered_ids.append((aid, it.get("name", aid)))
-                    api_error_logs.append(f"[{tok_label}] GET players/me/achievements -> 200 OK (Total: {len(items)}, Game: {len(discovered_ids)})")
+                for it in items:
+                    aid = it.get("id", "")
+                    if aid and not aid.startswith("CgkIsunb0aQR"):
+                        discovered_ids.append((aid, it.get("name", aid)))
+                api_error_logs.append(f"[{tok_label}] GET players/me/achievements -> 200 OK (Total: {len(items)}, Game: {len(discovered_ids)})")
             else:
                 api_error_logs.append(
                     f"[{tok_label}] GET players/me/achievements -> HTTP {r_defs.status_code}:\n{r_defs.text[:180]}"
@@ -418,17 +398,14 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
             api_error_logs.append(f"[{tok_label}] GET Exception: {str(e)[:80]}")
 
         if not discovered_ids:
-            if exact_names:
-                discovered_ids = [
-                    (target_cgkis[idx] if idx < len(target_cgkis) else f"exact_{idx+1}", name)
-                    for idx, name in enumerate(exact_names)
-                ]
-            else:
-                discovered_ids = [(cid, f"Lords_Ach_{idx}") for idx, cid in enumerate(target_cgkis[:8], start=1)]
+            discovered_ids = [(cid, f"Lords_Ach_{idx}") for idx, cid in enumerate(target_cgkis[:8], start=1)]
 
-        max_unlocks = len(exact_names) if exact_names else 8
+        candidates = discovered_ids[:exact_limit] if exact_limit is not None else discovered_ids[:8]
+
         logged_statuses = set()
-        for aid, aname in discovered_ids[:max_unlocks]:
+        for aid, aname in candidates:
+            if exact_limit is not None and len(unlocked_game_achs) >= exact_limit:
+                break
             url_unlock = f"https://www.googleapis.com/games/v1/achievements/{aid}/unlock"
             try:
                 ru = http_sess.post(url_unlock, headers=headers_clean, json={}, timeout=4)
@@ -439,7 +416,7 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
                         resp_j = {}
                     newly = resp_j.get("newlyUnlocked", False)
                     status_tag = "NEW! 200 OK" if newly else "200 OK"
-                    unlocked_game_achs.append(f"🎯 {html.escape(aname)} (<code>{html.escape(aid)}</code>) [{status_tag}]")
+                    unlocked_game_achs.append(f"🎯 {html.escape(aname)} (<code>{aid}</code>) [{status_tag}]")
                 else:
                     sig_key = f"{tok_label}_{aid[:10]}_{ru.status_code}"
                     if sig_key not in logged_statuses:
@@ -456,8 +433,8 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
         if unlocked_game_achs:
             break
 
-    # فتح إنجازات تطبيق Play Games العامة فقط إذا لم يكن الصندوق مقيّداً بقائمة إنجازات محددة
-    if fp_tok and not exact_names:
+    # فتح إنجازات تطبيق Play Games العامة (+XP)
+    if fp_tok:
         clean_fp = str(fp_tok).strip()
         h_fp = {
             "Authorization": f"Bearer {clean_fp}",
@@ -508,8 +485,8 @@ def execute_sync_flow(chat_id, msg_id, uid):
             f"🔄 <b>Stage 1/3: Logging into Google ({chest['name']})</b>\n\n"
             f"👤 {html.escape(masked_em)}\n"
             "① Authenticating via EmbeddedSetup...\n"
-            "② Requesting Token with Verified Cert...\n"
-            "③ Unlocking Target Achievements...",
+            "② Generating Valid CgkI Protobuf IDs...\n"
+            "③ Unlocking Achievements...",
             chat_id, msg_id
         )
 
@@ -535,11 +512,11 @@ def execute_sync_flow(chat_id, msg_id, uid):
             f"🔄 <b>Stage 3/3: Calling Play Games API ({chest['name']})</b>\n\n"
             f"👤 {html.escape(masked_em)}\n"
             f"🔑 <b>Auth Diag:</b> {html.escape(str(tokens.get('auth_diag')))}\n"
-            "📡 <i>Executing unlock requests...</i>",
+            "📡 <i>Executing fast unlock requests (max 5s)...</i>",
             chat_id, msg_id
         )
 
-        active_app_id = chest.get("app_id") or "N/A"
+        active_app_id = chest.get("app_id", "307216063448")
         target_cgkis = chest.get("task_ids", [])
 
         ok_game, game_achs, pg_achs, stage3_err_report = execute_stage3_play_games_api(
@@ -547,7 +524,7 @@ def execute_sync_flow(chat_id, msg_id, uid):
         )
 
         game_list_str = "\n".join([f"  • {name}" for name in game_achs]) if game_achs else "  • ❌ <b>لم يتم فتح أي إنجاز خاص باللعبة (انظر تقرير الخطأ أدناه)</b>"
-        pg_section = f"\n\n⭐ <b>Play Games XP Unlocked ({len(pg_achs)}):</b>\n" + ("\n".join([f"  • {name}" for name in pg_achs]) if pg_achs else "  • None") if not chest.get("exact_achievements") else ""
+        pg_list_str = "\n".join([f"  • {name}" for name in pg_achs]) if pg_achs else "  • None"
 
         status_header = "🎉 <b>Quest Execution Report (200 OK!)</b>" if ok_game else "⚠️ <b>اكتمل الفحص مع وجود ملاحظات في المرحلة 3</b>"
 
@@ -555,10 +532,11 @@ def execute_sync_flow(chat_id, msg_id, uid):
             f"{status_header}\n\n"
             f"🎁 <b>Chest:</b> {chest['name']}\n"
             f"📧 <b>Account:</b> {html.escape(email)}\n"
-            f"🆔 <b>Game Package:</b> <code>{chest['package']}</code>\n"
+            f"🆔 <b>Game Package:</b> <code>{chest['package']}</code> (ID: <code>{active_app_id}</code>)\n"
             f"🔐 <b>X-Android-Cert:</b> <code>{chest['client_sig']}</code>\n"
             f"🔑 <b>Stage 2 (Token Status):</b> {html.escape(str(tokens.get('auth_diag')))}\n\n"
-            f"🏆 <b>Game Achievements Unlocked ({len(game_achs)}):</b>\n{game_list_str}{pg_section}\n\n"
+            f"🏆 <b>Game Achievements Unlocked ({len(game_achs)}):</b>\n{game_list_str}\n\n"
+            f"⭐ <b>Play Games XP Unlocked ({len(pg_achs)}):</b>\n{pg_list_str}\n\n"
             "👉 Check <b>Google Play Store -> Play Points</b> now!"
         )
         safe_edit(done_text, chat_id, msg_id, reply_markup=retry_inline_keyboard())
@@ -750,5 +728,5 @@ def worker_embedded_login(CHAT_ID, msg_id, chest, masked_em, email, password):
         return False, str(e)[:120]
 
 if __name__ == "__main__":
-    print("Quest Helper Gossip Harbor Exact-4 Bot Started!")
+    print("Quest Helper Crash-Proof Stage 3 Started!")
     bot.infinity_polling(skip_pending=True)
