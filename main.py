@@ -57,13 +57,18 @@ CHESTS_DB = {
         )
     },
     "gossip_harbor": {
-        "name": "Gossip Harbor: Merge & Story",
+        "name": "Gossip Harbor: Merge & Story (50)",
         "package": "com.mergegames.gossipharbor",
         "app_id": None,
         "version_code": 1,
         "client_sig": GOSSIP_HARBOR_SIG_SHA1,
-        "exact_limit": 4,
-        "task_ids": []
+        "task_ids": [],
+        "target_names": [
+            "Brimwave Beginnings",
+            "Welcome to Brimwave",
+            "Starter Snack Bar",
+            "Leveled Up"
+        ]
     },
     "whiteout_survival": {
         "name": "Whiteout Survival (50)",
@@ -356,6 +361,8 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
     fp_tok = tokens_bundle.get("games_token")
     spec_list = tokens_bundle.get("game_specific_tokens", [])
     exact_limit = chest.get("exact_limit")
+    target_names = chest.get("target_names") or []
+    target_names_set = {n.strip().lower() for n in target_names if n and n.strip()}
 
     unlocked_game_achs = []
     unlocked_pg_achs = []
@@ -387,8 +394,10 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
                 items = data_j.get("items", [])
                 for it in items:
                     aid = it.get("id", "")
+                    aname = it.get("name", aid)
                     if aid and not aid.startswith("CgkIsunb0aQR"):
-                        discovered_ids.append((aid, it.get("name", aid)))
+                        if not target_names_set or aname.strip().lower() in target_names_set:
+                            discovered_ids.append((aid, aname))
                 api_error_logs.append(f"[{tok_label}] GET players/me/achievements -> 200 OK (Total: {len(items)}, Game: {len(discovered_ids)})")
             else:
                 api_error_logs.append(
@@ -397,10 +406,11 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
         except Exception as e:
             api_error_logs.append(f"[{tok_label}] GET Exception: {str(e)[:80]}")
 
-        if not discovered_ids:
+        if not discovered_ids and not target_names_set:
             discovered_ids = [(cid, f"Lords_Ach_{idx}") for idx, cid in enumerate(target_cgkis[:8], start=1)]
 
-        candidates = discovered_ids[:exact_limit] if exact_limit is not None else discovered_ids[:8]
+        max_items = len(target_names_set) if target_names_set else (exact_limit if exact_limit is not None else 8)
+        candidates = discovered_ids[:max_items]
 
         logged_statuses = set()
         for aid, aname in candidates:
