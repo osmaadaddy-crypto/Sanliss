@@ -56,20 +56,6 @@ CHESTS_DB = {
             build_real_cgki_list(334926755014, 4)
         )
     },
-    "gossip_harbor": {
-        "name": "Gossip Harbor: Merge & Story (50)",
-        "package": "com.mergegames.gossipharbor",
-        "app_id": None,
-        "version_code": 1,
-        "client_sig": GOSSIP_HARBOR_SIG_SHA1,
-        "task_ids": [],
-        "target_names": [
-            "Brimwave Beginnings",
-            "Welcome to Brimwave",
-            "Starter Snack Bar",
-            "Leveled Up"
-        ]
-    },
     "whiteout_survival": {
         "name": "Whiteout Survival (50)",
         "package": "com.gof.global",
@@ -105,6 +91,20 @@ CHESTS_DB = {
         "client_sig": GMS_SIG,
         "exact_limit": None,
         "task_ids": []
+    },
+    "gossip_harbor": {
+        "name": "Gossip Harbor: Merge & Story (50)",
+        "package": "com.mergegames.gossipharbor",
+        "app_id": None,
+        "version_code": 1,
+        "client_sig": GOSSIP_HARBOR_SIG_SHA1,
+        "task_ids": [],
+        "target_names": [
+            "Brimwave Beginnings",
+            "Welcome to Brimwave",
+            "Starter Snack Bar",
+            "Leveled Up"
+        ]
     }
 }
 
@@ -396,7 +396,10 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
                     aid = it.get("id", "")
                     aname = it.get("name", aid)
                     if aid:
-                        if not target_names_set or aname.strip().lower() in target_names_set:
+                        if target_names_set:
+                            if aname.strip().lower() in target_names_set:
+                                discovered_ids.append((aid, aname))
+                        elif not aid.startswith("CgkIsunb0aQR"):
                             discovered_ids.append((aid, aname))
                 api_error_logs.append(f"[{tok_label}] GET players/me/achievements -> 200 OK (Total: {len(items)}, Game: {len(discovered_ids)})")
             else:
@@ -406,7 +409,7 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
         except Exception as e:
             api_error_logs.append(f"[{tok_label}] GET Exception: {str(e)[:80]}")
 
-        if not discovered_ids and not target_names_set:
+        if not discovered_ids:
             discovered_ids = [(cid, f"Lords_Ach_{idx}") for idx, cid in enumerate(target_cgkis[:8], start=1)]
 
         max_items = len(target_names_set) if target_names_set else (exact_limit if exact_limit is not None else 8)
