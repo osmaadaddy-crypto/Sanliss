@@ -62,7 +62,7 @@ CHESTS_DB = {
         "app_id": None,
         "version_code": 1,
         "client_sig": GOSSIP_HARBOR_SIG_SHA1,
-        "exact_limit": 16,
+        "exact_limit": 5,
         "task_ids": []
     },
     "whiteout_survival": {
@@ -362,12 +362,8 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
     api_error_logs = []
 
     http_sess = requests.Session()
-    seen_ids = set()
 
     for tok_label, raw_tok in spec_list:
-        if exact_limit is not None and len(unlocked_game_achs) >= exact_limit:
-            break
-
         g_tok = str(raw_tok).strip()
         # استخدام ترويسة قياسية نظيفة بدون تكرار access_token في الرابط لمنع تعليق الخادم
         headers_clean = {
@@ -391,7 +387,7 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
                 items = data_j.get("items", [])
                 for it in items:
                     aid = it.get("id", "")
-                    if aid and not aid.startswith("CgkIsunb0aQR") and aid not in seen_ids:
+                    if aid and not aid.startswith("CgkIsunb0aQR"):
                         discovered_ids.append((aid, it.get("name", aid)))
                 api_error_logs.append(f"[{tok_label}] GET players/me/achievements -> 200 OK (Total: {len(items)}, Game: {len(discovered_ids)})")
             else:
@@ -402,24 +398,18 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
             api_error_logs.append(f"[{tok_label}] GET Exception: {str(e)[:80]}")
 
         if not discovered_ids:
-            discovered_ids = [(cid, f"Lords_Ach_{idx}") for idx, cid in enumerate(target_cgkis, start=1) if cid not in seen_ids]
+            discovered_ids = [(cid, f"Lords_Ach_{idx}") for idx, cid in enumerate(target_cgkis[:8], start=1)]
 
-        max_attempts = exact_limit if exact_limit is not None else 8
-        candidates = discovered_ids[:max_attempts]
+        candidates = discovered_ids[:exact_limit] if exact_limit is not None else discovered_ids[:8]
 
         logged_statuses = set()
         for aid, aname in candidates:
             if exact_limit is not None and len(unlocked_game_achs) >= exact_limit:
                 break
-            if exact_limit is None and len(unlocked_game_achs) >= 8:
-                break
-            if aid in seen_ids:
-                continue
             url_unlock = f"https://www.googleapis.com/games/v1/achievements/{aid}/unlock"
             try:
                 ru = http_sess.post(url_unlock, headers=headers_clean, json={}, timeout=4)
                 if ru.status_code == 200:
-                    seen_ids.add(aid)
                     try:
                         resp_j = ru.json()
                     except Exception:
@@ -439,6 +429,9 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
                 if sig_key not in logged_statuses:
                     logged_statuses.add(sig_key)
                     api_error_logs.append(f"[{tok_label}] POST Exception: {str(ex)[:80]}")
+
+        if unlocked_game_achs:
+            break
 
     # فتح إنجازات تطبيق Play Games العامة (+XP)
     if fp_tok:
