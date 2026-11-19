@@ -9,14 +9,18 @@ import threading
 import requests
 import gpsoauth
 import telebot
+from telebot import apihelper
 from telebot.types import (
     ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton
 )
 from playwright.sync_api import sync_playwright
 
+apihelper.READ_TIMEOUT = 25
+apihelper.CONNECT_TIMEOUT = 15
+
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML", threaded=True)
 
 GMS_SIG = "38918a453d07199354f8b19af05ec6562ced5788"
 LORDS_SIG_SHA1 = "75adf545f77fee9de110d4ddfae60bb3b9b17dad"
@@ -392,17 +396,11 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
                 except Exception:
                     data_j = {}
                 items = data_j.get("items", [])
-                if items:
-                    api_error_logs.append(f"[{tok_label}] Sample item: {json.dumps(items[0])[:180]}")
                 for it in items:
                     aid = it.get("id", "")
-                    aname = it.get("name", aid)
-                    if aid:
-                        if target_names_set:
-                            if aname.strip().lower() in target_names_set:
-                                discovered_ids.append((aid, aname))
-                        elif not aid.startswith("CgkIsunb0aQR"):
-                            discovered_ids.append((aid, aname))
+                    state = it.get("achievementState", "")
+                    if aid and state != "UNLOCKED":
+                        discovered_ids.append((aid, aid))
                 api_error_logs.append(f"[{tok_label}] GET players/me/achievements -> 200 OK (Total: {len(items)}, Game: {len(discovered_ids)})")
             else:
                 api_error_logs.append(
@@ -411,7 +409,7 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
         except Exception as e:
             api_error_logs.append(f"[{tok_label}] GET Exception: {str(e)[:80]}")
 
-        if not discovered_ids:
+        if not discovered_ids and not target_names_set:
             discovered_ids = [(cid, f"Lords_Ach_{idx}") for idx, cid in enumerate(target_cgkis[:8], start=1)]
 
         max_items = len(target_names_set) if target_names_set else (exact_limit if exact_limit is not None else 8)
@@ -744,4 +742,10 @@ def worker_embedded_login(CHAT_ID, msg_id, chest, masked_em, email, password):
 
 if __name__ == "__main__":
     print("Quest Helper Crash-Proof Stage 3 Started!")
-    bot.infinity_polling(skip_pending=True)
+    bot.remove_webhook()
+    while True:
+        try:
+            bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=15)
+        except Exception as poll_err:
+            print("Polling error:", poll_err)
+            time.sleep(3)
