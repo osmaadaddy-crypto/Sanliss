@@ -395,7 +395,7 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
                 for it in items:
                     aid = it.get("id", "")
                     aname = it.get("name", aid)
-                    if aid and not aid.startswith("CgkIsunb0aQR"):
+                    if aid:
                         if not target_names_set or aname.strip().lower() in target_names_set:
                             discovered_ids.append((aid, aname))
                 api_error_logs.append(f"[{tok_label}] GET players/me/achievements -> 200 OK (Total: {len(items)}, Game: {len(discovered_ids)})")
