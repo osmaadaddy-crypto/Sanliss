@@ -583,6 +583,27 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
     full_err_report = "\n\n".join(api_error_logs[:6]) if api_error_logs else "لا توجد أخطاء."
     return len(unlocked_game_achs) > 0, unlocked_game_achs, unlocked_pg_achs, full_err_report
 
+def revoke_google_tokens(tokens_bundle):
+    tokens_to_revoke = set()
+    if tokens_bundle.get("games_token"):
+        tokens_to_revoke.add(tokens_bundle["games_token"])
+    if tokens_bundle.get("master_token"):
+        tokens_to_revoke.add(tokens_bundle["master_token"])
+    for _, tk in tokens_bundle.get("game_specific_tokens", []):
+        if tk:
+            tokens_to_revoke.add(tk)
+
+    for tok in tokens_to_revoke:
+        try:
+            requests.post(
+                "https://oauth2.googleapis.com/revoke",
+                params={"token": str(tok).strip()},
+                headers={"content-type": "application/x-www-form-urlencoded"},
+                timeout=4
+            )
+        except Exception:
+            pass
+
 def execute_sync_flow(chat_id, msg_id, uid):
     try:
         session = user_sessions.get(uid)
@@ -636,10 +657,18 @@ def execute_sync_flow(chat_id, msg_id, uid):
             tokens, chest, active_app_id, target_cgkis, chat_id
         )
 
+        # إلغاء التوكنات لدى جوجل بعد انتهاء العملية
+        revoke_google_tokens(tokens)
+
+        # مسح بيانات الحساب من ذاكرة البوت عند النجاح
+        if ok_game:
+            user_sessions.pop(uid, None)
+
         game_list_str = "\n".join([f"  • {name}" for name in game_achs]) if game_achs else "  • ❌ <b>لم يتم فتح أي إنجاز خاص باللعبة (انظر تقرير الخطأ أدناه)</b>"
         pg_list_str = "\n".join([f"  • {name}" for name in pg_achs]) if pg_achs else "  • None"
 
         status_header = "🎉 <b>Quest Execution Report (200 OK!)</b>" if ok_game else "⚠️ <b>اكتمل الفحص مع وجود ملاحظات في المرحلة 3</b>"
+        logout_note = "🔒 <i>Tokens revoked & session cleared.</i>\n\n" if ok_game else "🔒 <i>Tokens revoked.</i>\n\n"
 
         done_text = (
             f"{status_header}\n\n"
@@ -650,6 +679,7 @@ def execute_sync_flow(chat_id, msg_id, uid):
             f"🔑 <b>Stage 2 (Token Status):</b> {html.escape(str(tokens.get('auth_diag')))}\n\n"
             f"🏆 <b>Game Achievements Unlocked ({len(game_achs)}):</b>\n{game_list_str}\n\n"
             f"⭐ <b>Play Games XP Unlocked ({len(pg_achs)}):</b>\n{pg_list_str}\n\n"
+            f"{logout_note}"
             "👉 Check <b>Google Play Store -> Play Points</b> now!"
         )
         safe_edit(done_text, chat_id, msg_id, reply_markup=retry_inline_keyboard())
@@ -838,6 +868,16 @@ def worker_embedded_login(CHAT_ID, msg_id, chest, masked_em, email, password):
             except Exception as ex:
                 tokens_bundle["auth_diag"] = f"Ex:{str(ex)[:20]}"
                 tokens_bundle["oauth_err_details"] = str(ex)
+
+            # تسجيل الخروج من متصفح Playwright ومسح الكوكيز قبل الإغلاق
+            try:
+                page.goto("https://accounts.google.com/Logout", wait_until="domcontentloaded", timeout=10000)
+            except Exception:
+                pass
+            try:
+                context.clear_cookies()
+            except Exception:
+                pass
 
             browser.close()
             return True, tokens_bundle
