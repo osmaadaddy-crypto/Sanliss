@@ -25,6 +25,7 @@ bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML", threaded=True)
 GMS_SIG = "38918a453d07199354f8b19af05ec6562ced5788"
 LORDS_SIG_SHA1 = "75adf545f77fee9de110d4ddfae60bb3b9b17dad"
 GOSSIP_HARBOR_SIG_SHA1 = "58e71785c961e7328ea9c76de647f8f6c4403b39"
+ARKNIGHTS_ENDFIELD_SIG_SHA1 = "978a77bfed2e9ed5d0ead626a1bf8ab1cd7a28e7"
 
 def encode_varint(val):
     out = bytearray()
@@ -38,7 +39,6 @@ def build_real_cgki_list(app_id_int, count=6):
     res = []
     app_bytes = encode_varint(int(app_id_int))
     for idx in range(1, count + 1):
-        # الصيغة القياسية لمعرفات CgkI في Google Play Games
         inner = b'\x08' + app_bytes + b'\x10\x01\x18' + encode_varint(idx)
         payload = b'\x0a' + encode_varint(len(inner)) + inner
         b64 = base64.urlsafe_b64encode(payload).decode('utf-8').rstrip('=')
@@ -73,6 +73,18 @@ CHESTS_DB = {
             "Brimwave Beginnings",
             "Starter Snack Bar",
             "Leveled Up"
+        ]
+    },
+    "arknights_endfield": {
+        "name": "Arknights: Endfield (50)",
+        "package": "com.gryphline.endfield.gp",
+        "app_id": None,
+        "version_code": 1,
+        "client_sig": ARKNIGHTS_ENDFIELD_SIG_SHA1,
+        "exact_limit": 1,
+        "task_ids": [],
+        "target_names": [
+            "Process: Awakening"
         ]
     },
     "whiteout_survival": {
@@ -231,6 +243,8 @@ def handle_callbacks(call):
 
 @bot.message_handler(func=lambda m: m.from_user.id in user_sessions)
 def handle_credentials_steps(message):
+    if not message.text:
+        return
     uid = message.from_user.id
     chat_id = message.chat.id
     session = user_sessions[uid]
@@ -376,9 +390,27 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
 
     http_sess = requests.Session()
 
+    # 1) تهيئة مسبقة (Warm-up) لتفعيل جلسة Play Games قبل طلبات اللعبة
+    if fp_tok:
+        try:
+            h_warm = {
+                "Authorization": f"Bearer {str(fp_tok).strip()}",
+                "Accept": "application/json",
+                "Content-Type": "application/json"
+            }
+            http_sess.get(
+                "https://www.googleapis.com/games/v1/players/me/achievements?language=en_US",
+                headers=h_warm,
+                timeout=5
+            )
+            time.sleep(1.5)
+        except Exception:
+            pass
+
+    token_refreshed = False
+
     for tok_label, raw_tok in spec_list:
         g_tok = str(raw_tok).strip()
-        # استخدام ترويسة قياسية نظيفة بدون تكرار access_token في الرابط لمنع تعليق الخادم
         headers_clean = {
             "Authorization": f"Bearer {g_tok}",
             "Accept": "application/json",
@@ -468,6 +500,28 @@ def execute_stage3_play_games_api(tokens_bundle, chest, app_id, target_cgkis, ch
             url_unlock = f"https://www.googleapis.com/games/v1/achievements/{aid}/unlock"
             try:
                 ru = http_sess.post(url_unlock, headers=headers_post, json={}, timeout=4)
+
+                # 2) معالجة HTTP 401 في أول محاولة: انتظار ثم إعادة المحاولة
+                if ru.status_code == 401:
+                    time.sleep(2.5)
+                    ru = http_sess.post(url_unlock, headers=headers_post, json={}, timeout=4)
+
+                # 3) إذا استمر 401، تجديد التوكن مرة واحدة عبر master_token
+                if ru.status_code == 401 and not token_refreshed and tokens_bundle.get("master_token"):
+                    token_refreshed = True
+                    new_toks, _, _ = request_play_games_tokens_with_debug(
+                        tokens_bundle["email"],
+                        tokens_bundle["master_token"],
+                        tokens_bundle["android_id"],
+                        chest
+                    )
+                    for n_lbl, n_tk in new_toks:
+                        if n_lbl == tok_label:
+                            headers_post["Authorization"] = f"Bearer {str(n_tk).strip()}"
+                            time.sleep(1.0)
+                            ru = http_sess.post(url_unlock, headers=headers_post, json={}, timeout=4)
+                            break
+
                 if ru.status_code == 200:
                     try:
                         resp_j = ru.json()
@@ -751,20 +805,24 @@ def worker_embedded_login(CHAT_ID, msg_id, chest, masked_em, email, password):
                 browser.close()
                 return False, "انتهت مهلة 60 ثانية دون الحصول على كوكي oauth_token."
 
+            android_id = "396566cb13f27421"
             tokens_bundle = {
                 "store_token": None,
                 "games_token": oauth_token,
                 "game_specific_tokens": [],
                 "auth_diag": "Init",
-                "oauth_err_details": ""
+                "oauth_err_details": "",
+                "master_token": None,
+                "email": email,
+                "android_id": android_id
             }
 
             try:
-                android_id = "396566cb13f27421"
                 master_res = gpsoauth.exchange_token(email, oauth_token, android_id, sdk_version=33)
                 master_token = master_res.get("Token")
 
                 if master_token:
+                    tokens_bundle["master_token"] = master_token
                     v2_toks, v2_diag, full_errs = request_play_games_tokens_with_debug(
                         email, master_token, android_id, chest
                     )
