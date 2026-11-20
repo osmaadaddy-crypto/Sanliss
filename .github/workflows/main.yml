@@ -25,10 +25,10 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Libraries, Apktool & Chromium
+      - name: Install Libraries, Apktool, FFmpeg & Chromium
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y apktool unzip curl default-jdk-headless
+          sudo apt-get install -y apktool unzip curl default-jdk-headless ffmpeg
           pip install -r requirements.txt
           playwright install chromium
           playwright install-deps chromium
