@@ -345,7 +345,7 @@ def transcribe_audio_url(audio_url, cookies_list=None):
         with sr.AudioFile(wav_path) as source:
             audio_data = recognizer.record(source)
         text = recognizer.recognize_google(audio_data, language="en-US")
-        return text.strip()
+        return text.strip() if text else None
     except Exception:
         return None
     finally:
@@ -356,62 +356,127 @@ def transcribe_audio_url(audio_url, cookies_list=None):
                 except Exception:
                     pass
 
-def solve_audio_captcha_if_present(page, context, chat_id, msg_id, chest, masked_em):
-    """يكتشف اختبار التحقق (reCAPTCHA أو الكابتشا الكلاسيكية) ويحله صوتياً تلقائياً."""
-    if not AUDIO_CAPTCHA_READY:
+def click_locator_reliably(page, loc):
+    """ينقر على عنصر داخل الصفحة أو iframe بدقة عبر الإحداثيات ثم force=True."""
+    try:
+        loc.scroll_into_view_if_needed(timeout=1500)
+    except Exception:
+        pass
+    try:
+        box = loc.bounding_box(timeout=2000)
+        if box and box.get("width", 0) > 0 and box.get("height", 0) > 0:
+            cx = box["x"] + box["width"] / 2
+            cy = box["y"] + box["height"] / 2
+            page.mouse.click(cx, cy)
+            return True
+    except Exception:
+        pass
+    try:
+        loc.click(force=True, timeout=2000)
+        return True
+    except Exception:
         return False
 
+def solve_audio_captcha_if_present(page, context, chat_id, msg_id, chest, masked_em):
+    """يكتشف مربع التحقق واختبار التحقق الصوتي ويحله تلقائياً. يرجع (نجح_أو_لا، سبب_التشخيص)."""
+    clicked_checkbox = False
     try:
-        # 1) فحص وجود reCAPTCHA v2 iframe
-        anchor_iframe = page.locator('iframe[src*="recaptcha/api2/anchor"], iframe[title*="reCAPTCHA"]').first
-        if anchor_iframe.is_visible(timeout=2000):
-            safe_edit(
-                f"⚡ <b>تسجيل الدخول إلى Google Play ({chest['name']})</b>\n\n"
-                f"📧 <b>الحساب:</b> {html.escape(masked_em)}\n\n"
-                "⏳ [⚡] <b>جاري حل اختبار التحقق الصوتي بسرعة فائقة...</b>",
-                chat_id, msg_id
-            )
-            anchor_frame = page.frame_locator('iframe[src*="recaptcha/api2/anchor"], iframe[title*="reCAPTCHA"]').first
-            checkbox = anchor_frame.locator('#recaptcha-anchor')
-            if checkbox.is_visible(timeout=3000):
-                checkbox.click()
-                page.wait_for_timeout(2500)
+        for _ in range(4):
+            for fr in page.frames:
+                try:
+                    cb = fr.locator('#recaptcha-anchor, span[role="checkbox"], .recaptcha-checkbox-border').first
+                    if cb.count() > 0 and cb.is_visible(timeout=700):
+                        if not clicked_checkbox:
+                            safe_edit(
+                                f"⚡ <b>تسجيل الدخول إلى Google Play ({chest['name']})</b>\n\n"
+                                f"📧 <b>الحساب:</b> {html.escape(masked_em)}\n\n"
+                                "⏳ [⚡] <b>جاري النقر على مربع التحقق وحل الاختبار الصوتي...</b>",
+                                chat_id, msg_id
+                            )
+                        if click_locator_reliably(page, cb):
+                            clicked_checkbox = True
+                            break
+                except Exception:
+                    pass
+            if clicked_checkbox:
+                break
+            page.wait_for_timeout(800)
 
-            bframe_loc = page.locator('iframe[src*="recaptcha/api2/bframe"]').first
-            if bframe_loc.is_visible(timeout=3000):
-                bframe = page.frame_locator('iframe[src*="recaptcha/api2/bframe"]').first
-                audio_btn = bframe.locator('#recaptcha-audio-button')
-                if audio_btn.is_visible(timeout=3000):
-                    audio_btn.click()
-                    page.wait_for_timeout(2500)
+        if clicked_checkbox:
+            if not AUDIO_CAPTCHA_READY:
+                return False, "مكتبات الصوت (SpeechRecognition/pydub) غير مفعلة."
 
-                audio_src = None
-                src_el = bframe.locator('#audio-source')
-                if src_el.count() > 0:
-                    audio_src = src_el.get_attribute('src')
-                if not audio_src:
-                    dl_el = bframe.locator('.rc-audiochallenge-tdownload-link')
-                    if dl_el.count() > 0:
-                        audio_src = dl_el.get_attribute('href')
+            # انتظار نشط لظهور إطار التحدي وزر الصوت (حتى 8 ثوانٍ)
+            audio_clicked = False
+            target_bframe = None
+            for _ in range(8):
+                for fr in page.frames:
+                    try:
+                        btxt = fr.inner_text("body", timeout=500)
+                        if any(k in btxt.lower() for k in ["try again later", "automated queries", "حاول مرة أخرى"]):
+                            return False, "تم حجب التحدي الصوتي من reCAPTCHA."
+                    except Exception:
+                        pass
+                    try:
+                        audio_btn = fr.locator(
+                            '#recaptcha-audio-button, button[id*="audio" i], '
+                            'button[title*="audio" i], button[aria-label*="audio" i], '
+                            'button[aria-label*="Listen" i]'
+                        ).first
+                        if audio_btn.count() > 0 and audio_btn.is_visible(timeout=600):
+                            if click_locator_reliably(page, audio_btn):
+                                audio_clicked = True
+                                target_bframe = fr
+                                break
+                    except Exception:
+                        pass
+                if audio_clicked:
+                    break
+                page.wait_for_timeout(1000)
 
+            if not audio_clicked or not target_bframe:
+                return False, "تم النقر على المربع لكن لم يظهر/يُضغط زر الصوت."
+
+            page.wait_for_timeout(2500)
+
+            audio_src = None
+            for _ in range(4):
+                try:
+                    src_el = target_bframe.locator('#audio-source, audio source, audio').first
+                    if src_el.count() > 0:
+                        audio_src = src_el.get_attribute('src')
+                    if not audio_src:
+                        dl_el = target_bframe.locator('.rc-audiochallenge-tdownload-link, a[href*="/audio"]').first
+                        if dl_el.count() > 0:
+                            audio_src = dl_el.get_attribute('href')
+                except Exception:
+                    pass
                 if audio_src:
-                    solved_text = transcribe_audio_url(audio_src, context.cookies())
-                    if solved_text:
-                        bframe.locator('#audio-response').fill(solved_text)
-                        page.wait_for_timeout(400)
-                        bframe.locator('#recaptcha-verify-button').click()
-                        page.wait_for_timeout(3000)
+                    break
+                page.wait_for_timeout(800)
 
-            # الضغط على Next بعد حل الكابتشا إن كان ظاهراً
-            next_after = page.locator('#identifierNext, button:has-text("Next"), button:has-text("التالي")').first
-            if next_after.is_visible(timeout=1500):
-                next_after.click()
-                page.wait_for_timeout(3500)
-            return True
+            if not audio_src:
+                return False, "تم الضغط على زر الصوت لكن لم يُعثر على رابط المقطع الصوتي."
 
-        # 2) فحص وجود كابتشا جوجل الكلاسيكية (input[name="ca"])
+            solved_text = transcribe_audio_url(audio_src, context.cookies())
+            if not solved_text:
+                return False, "تعذر تحويل المقطع الصوتي إلى نص."
+
+            try:
+                resp_input = target_bframe.locator('#audio-response, input[type="text"]').first
+                if resp_input.count() > 0:
+                    resp_input.fill(solved_text)
+                    page.wait_for_timeout(400)
+                verify_btn = target_bframe.locator('#recaptcha-verify-button, button[type="submit"]').first
+                if verify_btn.count() > 0:
+                    click_locator_reliably(page, verify_btn)
+                    page.wait_for_timeout(3000)
+            except Exception as e_sub:
+                return False, f"فشل إرسال نص التحقق الصوتي: {str(e_sub)[:60]}"
+
+        # فحص كابتشا جوجل الكلاسيكية (input[name="ca"])
         classic_ca = page.locator('input[name="ca"], input#ca').first
-        if classic_ca.is_visible(timeout=1500):
+        if classic_ca.is_visible(timeout=1200) and AUDIO_CAPTCHA_READY:
             safe_edit(
                 f"⚡ <b>تسجيل الدخول إلى Google Play ({chest['name']})</b>\n\n"
                 f"📧 <b>الحساب:</b> {html.escape(masked_em)}\n\n"
@@ -419,8 +484,8 @@ def solve_audio_captcha_if_present(page, context, chat_id, msg_id, chest, masked
                 chat_id, msg_id
             )
             audio_trigger = page.locator('button[aria-label*="Listen"], button[aria-label*="audio"], #captchaAudio').first
-            if audio_trigger.is_visible(timeout=2000):
-                audio_trigger.click()
+            if audio_trigger.is_visible(timeout=1500):
+                click_locator_reliably(page, audio_trigger)
                 page.wait_for_timeout(2000)
 
             audio_el = page.locator('audio source, audio').first
@@ -430,21 +495,18 @@ def solve_audio_captcha_if_present(page, context, chat_id, msg_id, chest, masked
                     audio_src = "https://accounts.google.com" + audio_src
                 solved_text = transcribe_audio_url(audio_src, context.cookies())
                 if solved_text:
-                    # أحياناً الكابتشا الصوتية الكلاسيكية تكون أرقاماً فقط
                     clean_ans = re.sub(r"\s+", "", solved_text)
                     classic_ca.fill(clean_ans)
                     page.wait_for_timeout(400)
-                    next_btn = page.locator('#identifierNext, button:has-text("Next"), button:has-text("التالي")').first
-                    if next_btn.is_visible():
-                        next_btn.click()
-                    else:
-                        page.keyboard.press("Enter")
-                    page.wait_for_timeout(3500)
-                    return True
-    except Exception:
-        pass
 
-    return False
+        next_after = page.locator('#identifierNext, button:has-text("Next"), button:has-text("التالي")').first
+        if next_after.is_visible(timeout=1500):
+            click_locator_reliably(page, next_after)
+            page.wait_for_timeout(3500)
+
+        return clicked_checkbox, "تمت معالجة التحقق."
+    except Exception as e:
+        return False, f"خطأ أثناء التحقق: {str(e)[:80]}"
 
 def request_play_games_tokens_with_debug(email, master_token, android_id, chest):
     pkg = chest["package"]
@@ -870,17 +932,18 @@ def worker_embedded_login(CHAT_ID, msg_id, chest, masked_em, email, password):
 
             page.wait_for_timeout(4000)
 
-            # محاولة حل اختبار التحقق الصوتي تلقائياً إذا ظهر قبل حقل كلمة المرور
+            captcha_diag = ""
             pwd_loc = page.locator('input[type="password"], input[name="Passwd"]').first
             if not pwd_loc.is_visible():
-                solve_audio_captcha_if_present(page, context, CHAT_ID, msg_id, chest, masked_em)
+                _, captcha_diag = solve_audio_captcha_if_present(page, context, CHAT_ID, msg_id, chest, masked_em)
                 page.wait_for_timeout(2000)
 
             if not pwd_loc.is_visible():
                 shot = page.screenshot()
                 bot.send_photo(CHAT_ID, shot, caption="❌ توقف عند إدخال الإيميل (لم يتجاوز التحقق)")
                 browser.close()
-                return False, "لم يظهر حقل كلمة المرور."
+                reason = f"لم يظهر حقل كلمة المرور. ({captcha_diag})" if captcha_diag else "لم يظهر حقل كلمة المرور."
+                return False, reason
 
             pwd_loc.fill(password)
             page.wait_for_timeout(500)
